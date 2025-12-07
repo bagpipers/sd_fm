@@ -6,9 +6,8 @@ from typing import Dict, Optional, Tuple, Union
 
 class OTConditionalFlowMatching:
     """
-    Optimal Transport (OT) Path を用いた Conditional Flow Matching (CFM) を実装します。
-    論文 "Flow Matching for Generative Modeling" (arXiv:2210.02747v2) の
-    セクション 4.1, Example II: Optimal Transport conditional VFs に基づいています。
+    Independent FM を用いた Conditional Flow Matching (CFM) 
+    論文 "Flow Matching for Generative Modeling" (arXiv:2210.02747v2) 
     """
     def __init__(self, sigma_min: float = 1e-5):
         """
@@ -37,17 +36,17 @@ class OTConditionalFlowMatching:
         # t の次元を (B,) -> (B, 1, 1, 1) のように x の次元に合わせる
         t_batch = t.view(-1, *([1] * (x_1.dim() - 1)))
         
-        # 1. OT Path の係数計算 (Eq. 20)
+        # 1. OT Path の係数計算 
         # μ_t(x_1) = t * x_1
         # σ_t = 1 - (1 - σ_min) * t
         mu_t = t_batch * x_1
         sigma_t = 1 - (1 - self.sigma_min) * t_batch
         
-        # 2. x_t のサンプリング (Eq. 22)
+        # 2. x_t のサンプリング 
         # x_t = σ_t * x_0 + μ_t(x_1)
         x_t = sigma_t * x_0 + mu_t
         
-        # 3. ターゲット速度場 (Flow Matching Objective) (Eq. 23 のターゲット項)
+        # 3. ターゲット速度場 (Flow Matching Objective) 
         # u_t = d/dt [σ_t * x_0 + μ_t(x_1)]
         # u_t = d/dt [(1 - (1 - σ_min) * t) * x_0 + t * x_1]
         # u_t = -(1 - σ_min) * x_0 + x_1
@@ -59,7 +58,7 @@ class OTConditionalFlowMatching:
         self, model: nn.Module, x_1: torch.Tensor, condition: torch.Tensor
     ) -> torch.Tensor:
         """
-        CFM (OT Path) の損失 (Eq. 23) を計算します。
+        CFM (OT Path) の損失 を計算します。
         
         L_CFM = E[ || v_t(x_t, t, condition) - u_t ||^2 ]
         
@@ -87,7 +86,7 @@ class OTConditionalFlowMatching:
         # pred_v = v_t(x_t, t, condition)
         pred_v = model(x_t, t, context=condition)
         
-        # 4. MSE Loss (Eq. 23)
+        # 4. MSE Loss 
         # (pred_v - target_v) の二乗誤差の期待値 (バッチ平均)
         loss = torch.mean((pred_v - target_v) ** 2)
         return loss

@@ -1,0 +1,55 @@
+# configs/config_sd.yaml
+
+device: "cuda"
+
+data:
+  root_dir: "/mnt/k/2025/imagenet_dataset"
+  height: 64        
+  width: 64        
+  channels: 3   
+  metadata_file: "metadata.csv" 
+
+model:
+  condition_type: "class" 
+  
+  clip_config:
+    text_encoder_name: "openai/clip-vit-base-patch32"
+    max_text_length: 77
+    embed_dim: 768 
+
+  class_config:
+    num_classes: 1000
+    embed_dim: 512  
+
+  unet_config:
+    base_dim: 128        
+    dim_mults: [1, 2, 4] 
+    num_attn_heads: 4    
+
+sampling:
+  steps: 20
+  method: 'euler'
+  guidance_scale: 7.5 
+
+training:
+  batch_size: 64  # FM学習時のバッチサイズ
+  lr: 1.0e-4
+  cfg_drop_prob: 0.1 
+  num_epochs: 100     
+  num_workers: 8
+  save_dir: "outputs/sd_fm_experiment"
+
+# --- ★ SD-FM Specific Configurations ★ ---
+sd_config:
+  # PCA次元削減 (論文では500推奨)
+  use_pca: true
+  pca_dim: 500
+  
+  # SD-OT (ポテンシャル学習) の設定
+  potential_lr: 1000.0  # 論文推奨: データ数Nに応じて調整 (例: 10^3)
+  potential_steps: 200000
+  potential_batch_size: 1024
+  
+  # メモリ対策: ペアリング計算時のチャンクサイズ
+  # データ数Nが大きい場合、一度に計算するとOOMになるため分割する
+  pairing_chunk_size: 10000

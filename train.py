@@ -31,17 +31,12 @@ def main():
     save_dir = config['training'].get('save_dir', 'outputs')
     os.makedirs(save_dir, exist_ok=True)
     print(f"Model checkpoints will be saved to: {save_dir}")
-
-    # --- モデルとオプティマイザの準備 ---
     condition_model = ConditioningModel(config).to(device)
     print(f"Loaded ConditioningModel (Mode: {condition_model.condition_type})")
     model = TextConditionedUNet(config).to(device)
     cfm = OTConditionalFlowMatching(sigma_min=1e-5)
     params_to_optimize = list(model.parameters()) + list(condition_model.parameters())
     optimizer = optim.Adam(params_to_optimize, lr=config['training']['lr'])
-    
-
-    # --- データローダーの準備 ---
     img_channels = config['data']['channels']
     mean = [0.5] * img_channels
     std = [0.5] * img_channels
@@ -72,8 +67,6 @@ def main():
         collate_fn=collate_fn,
         num_workers=config['training'].get('num_workers', 4) 
     )
-
-    # --- 学習ループ ---
     num_epochs = config['training'].get('num_epochs', 10) 
     print(f"Training Step Start (for {num_epochs} epochs)...")
     
@@ -107,23 +100,17 @@ def main():
         
         avg_epoch_loss = total_loss / steps_in_epoch if steps_in_epoch > 0 else 0
         print(f"Epoch {epoch+1} finished. Average Loss: {avg_epoch_loss:.4f}")
-
-        # --- ★ エポックごとのモデル保存 ---
         epoch_save_path = os.path.join(save_dir, f"model_epoch_{epoch+1}.pth")
         torch.save({
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'condition_model_state_dict': condition_model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(), # オプティマイザの状態も保存推奨
+            'optimizer_state_dict': optimizer.state_dict(), 
             'loss': avg_epoch_loss,
         }, epoch_save_path)
         print(f"Saved checkpoint to {epoch_save_path}")
-
-    # --- 学習ループ終了 ---
     
     print(f"Training finished after {global_step} steps.")
-    
-    # 最終モデルとして、別途 "model_final.pth" という名前でも保存しておくと便利です
     final_save_path = os.path.join(save_dir, "model_final.pth")
     torch.save({
         'epoch': num_epochs,

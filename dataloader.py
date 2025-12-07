@@ -3,7 +3,6 @@ import torch
 import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset
-# from transformers import CLIPTokenizer (★ 依存削除)
 
 class T2IDataset(Dataset):
     """
@@ -17,8 +16,6 @@ class T2IDataset(Dataset):
         self.root_dir = root_dir
         self.image_dir = os.path.join(root_dir, "images")
         self.image_transform = image_transform
-        
-        # --- ★ ここから追加 ---
         self.target_channels = target_channels
         if self.target_channels == 1:
             self.convert_mode = 'L'
@@ -28,7 +25,6 @@ class T2IDataset(Dataset):
             self.convert_mode = 'RGBA'
         else:
             raise ValueError(f"Unsupported target_channels: {target_channels}. Must be 1, 3, or 4.")
-        # --- ★ ここまで追加 ---
             
         metadata_path = os.path.join(root_dir, metadata_file)
         file_extension = os.path.splitext(metadata_path)[1].lower()
@@ -60,11 +56,7 @@ class T2IDataset(Dataset):
         except FileNotFoundError:
             print(f"Warning: Image file not found {img_path}. Skipping.")
             return self.__getitem__((idx + 1) % len(self)) 
-        
-        # --- ★ 変更点 ---
-        # 読み込んだ画像を、指定されたチャンネル数 (L, RGB, RGBA) に変換する
         image = image.convert(self.convert_mode)
-        # --- ★ 変更ここまで ---
 
         if self.image_transform:
             image = self.image_transform(image)
@@ -90,11 +82,9 @@ class T2ICollate:
     バッチを辞書型にまとめるだけのシンプルなクラス
     """
     def __init__(self):
-        # (tokenizer, max_length は不要)
         pass
 
     def __call__(self, batch):
-        # 1. データを各要素に分離
         images = []
         pos_prompts = []
         neg_prompts = []
@@ -103,11 +93,7 @@ class T2ICollate:
             images.append(item["image"])
             pos_prompts.append(item["positive_prompt"])
             neg_prompts.append(item["negative_prompt"])
-            
-        # 2. 画像をテンソルにスタック
         image_batch = torch.stack(images)
-        
-        # 3. テキストはトークナイズ *せず*、生のリストとして返す
         return {
             "pixel_values": image_batch,
             "positive_prompt": pos_prompts, # (★ 生の文字列リスト)

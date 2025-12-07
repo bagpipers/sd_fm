@@ -41,6 +41,7 @@
 #   num_workers: 4
 
 
+# -- independent Flow Matching Config --- 
 
 device: "cuda"
 

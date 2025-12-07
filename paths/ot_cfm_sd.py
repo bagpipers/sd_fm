@@ -15,17 +15,8 @@ class PairedOTCFM(OTConditionalFlowMatching):
         """
         b = x_1.shape[0]
         device = x_1.device
-        
-        # 時刻 t ~ U[0, 1]
         t = torch.rand(b, device=device)
-        
-        # 既存クラスのメソッドを利用して補間 (x_t) とターゲット速度 (u_t) を計算
-        # sample_location_and_conditional_flow は ot_cfm.py に実装済みと仮定
         x_t, target_v = self.sample_location_and_conditional_flow(x_0, x_1, t)
-        
-        # モデル予測
         pred_v = model(x_t, t, context=condition)
-        
-        # Loss
         loss = torch.mean((pred_v - target_v) ** 2)
         return loss

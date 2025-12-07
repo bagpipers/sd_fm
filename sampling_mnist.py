@@ -7,7 +7,6 @@ import math
 from pipeline import InferencePipeline
 
 def main():
-    # 1. 設定ファイルの読み込み (プロンプト決定とファイル名のために使用)
     config_path = "configs/config.yaml"
     checkpoint_path = "outputs/model.pth"
 
@@ -27,8 +26,6 @@ def main():
         return
         
     print("Pipeline initialized.")
-
-    # --- 2. 推論用プロンプトの準備 (config に基づく) ---
     condition_type = config['model']['condition_type']
     prompts_to_sample = []
     
@@ -56,26 +53,15 @@ def main():
     if not prompts_to_sample:
         print("No prompts defined for sampling. Exiting.")
         return
-
-    # --- 3. パイプライン実行 ---
-    # パイプラインは config.yaml から sampling 設定 (steps, cfg_scale) を読み込みます
-    # ここで引数を渡して上書きも可能です:
-    # images = pipe(prompts_to_sample, steps=50, guidance_scale=10.0)
     
     images = pipe(prompts_to_sample)
     
     print(f"Generated shape: {images.shape}")
-    
-    # --- 4. 画像を保存 ---
     os.makedirs("outputs", exist_ok=True)
-    
-    # config から CFG スケールを取得 (ファイル名用)
     guidance_scale = config['sampling'].get('guidance_scale', 0.0)
     save_path = f"outputs/generated_pipeline_{condition_type}_cfg{guidance_scale}.png"
     
     batch_size = len(prompts_to_sample)
-    
-    # グリッドの列数を計算 (10枚なら5列x2行)
     nrow = 5 if batch_size == 10 else math.ceil(math.sqrt(batch_size))
         
     save_image(

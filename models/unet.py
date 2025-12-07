@@ -4,7 +4,6 @@ import math
 
 
 class SinusoidalPositionEmbeddings(nn.Module):
-    # (変更なし)
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
@@ -18,7 +17,6 @@ class SinusoidalPositionEmbeddings(nn.Module):
         return embeddings
 
 class ResBlock(nn.Module):
-    # (変更なし)
     def __init__(self, in_c, out_c, time_emb_dim, num_groups=8):
         super().__init__()
         self.conv1 = nn.Conv2d(in_c, out_c, 3, padding=1)
@@ -36,7 +34,6 @@ class ResBlock(nn.Module):
         return h + self.residual_conv(x)
 
 class SimpleCrossAttention(nn.Module):
-    # (変更なし)
     def __init__(self, query_dim, context_dim, num_heads):
         super().__init__()
         self.attn = nn.MultiheadAttention(
@@ -55,9 +52,6 @@ class SimpleCrossAttention(nn.Module):
         x_out = x_seq.permute(0, 2, 1).view(B, C, H, W)
         return x_out
 
-
-# --- メインのUNetモデル (★ 修正箇所 ★) ---
-
 class TextConditionedUNet(nn.Module):
     """
     config.yaml の設定に基づき、
@@ -69,10 +63,6 @@ class TextConditionedUNet(nn.Module):
         data_cfg = config['data']
         model_cfg = config['model']
         unet_cfg = model_cfg['unet_config']
-        
-        # --- ★ 変更点 ★ ---
-        # どのモードで動作しているかに基づき、
-        # Cross-Attention の次元 (context_dim) を決定する
         condition_type = model_cfg['condition_type']
         if condition_type == "clip":
             context_dim = model_cfg['clip_config']['embed_dim'] # 例: 768
@@ -80,7 +70,6 @@ class TextConditionedUNet(nn.Module):
             context_dim = model_cfg['class_config']['embed_dim'] # 例: 512
         else:
             raise ValueError(f"Unknown condition_type: {condition_type}")
-        # --- ★ 変更ここまで ★ ---
 
         in_channels = data_cfg['channels']       # 3
         base_dim = unet_cfg['base_dim']        # 64
@@ -88,8 +77,6 @@ class TextConditionedUNet(nn.Module):
         num_heads = unet_cfg['num_attn_heads']   # 4
         
         dims = [base_dim] + [base_dim * m for m in dim_mults]
-        
-        # (Time Embedding)
         time_dim = base_dim * 4
         self.time_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(base_dim),
@@ -97,11 +84,7 @@ class TextConditionedUNet(nn.Module):
             nn.SiLU(),
             nn.Linear(time_dim, time_dim),
         )
-        
-        # (Input)
         self.init_conv = nn.Conv2d(in_channels, base_dim, 3, padding=1)
-        
-        # (Down Blocks)
         self.down_blocks = nn.ModuleList()
         num_resolutions = len(dims) - 1
         
@@ -110,18 +93,13 @@ class TextConditionedUNet(nn.Module):
             out_c = dims[i+1]
             self.down_blocks.append(nn.ModuleList([
                 ResBlock(in_c, out_c, time_dim),
-                # ★ context_dim を渡す
                 SimpleCrossAttention(out_c, context_dim, num_heads),
                 nn.Conv2d(out_c, out_c, 4, stride=2, padding=1) 
             ]))
-            
-        # (Mid Blocks)
         mid_dim = dims[-1]
         self.mid_block1 = ResBlock(mid_dim, mid_dim, time_dim)
         self.mid_attn = SimpleCrossAttention(mid_dim, context_dim, num_heads)
         self.mid_block2 = ResBlock(mid_dim, mid_dim, time_dim)
-
-        # (Up Blocks)
         self.up_blocks = nn.ModuleList()
         for i in reversed(range(num_resolutions)):
             in_c = dims[i+1]
@@ -132,13 +110,10 @@ class TextConditionedUNet(nn.Module):
                 ResBlock(out_c + in_c, out_c, time_dim),
                 SimpleCrossAttention(out_c, context_dim, num_heads),
             ]))
-
-        # (Output)
         self.final_conv = nn.Conv2d(base_dim, in_channels, 1)
         print(f"Initialized Simple UNet. Mode='{condition_type}', Cross-Attention Dim={context_dim}")
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, context: torch.Tensor):
-        # (forward のロジックは変更なし)
         
         t_emb = self.time_mlp(t)
         x = self.init_conv(x)
