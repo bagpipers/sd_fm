@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Data (データセットはGit管理外)
+data/
+*.png
+*.jpg
+*.csv
+*.log
+
+# Outputs (生成物)
+outputs/
+*.png
+*.jpg
+*.pth
+*.pt
+*.log
+
+# IDE
+.vscode/
+.idea/
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.env
+.env.*
+.DS_Store
+Thumbs.db
+._*
+logs/

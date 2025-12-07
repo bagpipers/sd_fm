@@ -1,0 +1,89 @@
+# device: "cuda"
+
+# data:
+#   root_dir: "/mnt/k/2025/mnist_dataset"
+  
+#   height: 28        
+#   width: 28        
+#   channels: 1   
+#   metadata_file: "metadata.csv" 
+#   # metadata_file: "metadata.jsonl"  
+
+# model:
+ 
+#   condition_type: "class" 
+#   #condition_type: "clip"
+  
+#   clip_config:
+#     text_encoder_name: "openai/clip-vit-base-patch32"
+#     max_text_length: 77
+#     embed_dim: 768 
+
+#   class_config:
+#     num_classes: 10   
+#     embed_dim: 512  
+
+#   unet_config:
+#     base_dim: 64         
+#     dim_mults: [1, 2] 
+#     num_attn_heads: 4    
+
+# sampling:
+#   steps: 20
+#   method: 'euler'
+#   guidance_scale: 7.5 
+
+# training:
+#   batch_size: 64
+#   lr: 1.0e-4
+#   cfg_drop_prob: 0.1 
+#   num_epochs: 10     
+#   num_workers: 4
+
+
+
+device: "cuda"
+
+data:
+  # prepare_imagenet.py で指定した output_dir と合わせる
+  root_dir: "/mnt/k/2025/imagenet_dataset"
+  
+  # ImageNetの標準的な学習サイズ (64, 128, 256 など)
+  height: 256        
+  width: 256        
+  channels: 3   # RGBなので3
+  metadata_file: "metadata.csv" 
+
+model:
+  # クラスIDを使う場合 "class"、テキスト(クラス名)を使う場合 "clip"
+  # prepare_imagenet.py の --use_class_name 次第で変更してください
+  condition_type: "class" 
+  # condition_type: "clip"
+  
+  clip_config:
+    text_encoder_name: "openai/clip-vit-base-patch32"
+    max_text_length: 77
+    embed_dim: 768 
+
+  class_config:
+    num_classes: 1000   # ImageNetは1000クラス
+    embed_dim: 512  
+
+  unet_config:
+    base_dim: 128        # 画像サイズが大きくなるので少し増やすのが一般的
+    dim_mults: [1, 2, 4] # 深さを増やす
+    num_attn_heads: 4    
+
+sampling:
+  steps: 20
+  method: 'euler'
+  guidance_scale: 7.5 
+
+training:
+  batch_size: 4 
+  lr: 1.0e-4
+  cfg_drop_prob: 0.1 
+  num_epochs: 50     
+  num_workers: 8 # データ量が多いのでworkerを増やす
+
+save_dir: "outputs/imagenet_experiment_1"
