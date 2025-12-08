@@ -59,7 +59,7 @@ class SemidiscreteOT_Solver:
             Y_sq_chunk = Y_sq_norm[i:end]
             
             cross_term = 2 * torch.matmul(X, Y_chunk.t())
-            bias = g_chunk - Y_sq_chunk
+            bias = g_chunk 
             scores = cross_term + bias.unsqueeze(0)
             
             chunk_max_scores, chunk_max_indices = torch.max(scores, dim=1)

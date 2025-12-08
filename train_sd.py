@@ -4,8 +4,6 @@ import yaml
 import os
 from torchvision import transforms 
 from tqdm import tqdm 
-
-# モデルとローダーのインポート
 from models.unet import TextConditionedUNet
 from models.conditioning import ConditioningModel 
 from dataloader import T2IDataset 
@@ -30,15 +28,11 @@ def main():
     
     img_channels = config['data']['channels']
     h, w = config['data']['height'], config['data']['width']
-    
-    # 画像の前処理: [-1, 1] に正規化
     transform = transforms.Compose([
         transforms.Resize((h, w)), 
         transforms.ToTensor(), 
         transforms.Normalize([0.5]*img_channels, [0.5]*img_channels)
     ])
-    
-    # 元データの準備 (SD_Managerが内部でFeature抽出に使用)
     raw_dataset = T2IDataset(
         root_dir=config['data']['root_dir'], 
         metadata_file=config['data']['metadata_file'], 
@@ -46,19 +40,10 @@ def main():
         target_channels=img_channels 
     )
     print(f"Raw dataset size: {len(raw_dataset)}")
-    
-    # SD-Manager: ポテンシャル学習とデータローダー構築
-    # ※ semidiscrete/sd_loader.py が正しい(File 4)ものであることを確認してください
     sd_manager = SD_Manager(config, device)
-    
-    # SD-FM用データローダー (ペアリング済みバッチを返す)
     dataloader = sd_manager.prepare_dataloader(raw_dataset)
-    
-    # モデルの準備
     condition_model = ConditioningModel(config).to(device)
     model = TextConditionedUNet(config).to(device)
-    
-    # SD-FM用ロス計算クラス
     cfm = PairedOTCFM(sigma_min=1e-5)
     
     optimizer = optim.Adam(
@@ -71,7 +56,6 @@ def main():
     condition_model.train()
     
     batch_size = config['training']['batch_size']
-    # IterableDataset のため、epochあたりのステップ数を手動計算
     steps_per_epoch = len(raw_dataset) // batch_size
     num_epochs = config['training']['num_epochs']
     
@@ -81,22 +65,16 @@ def main():
         
         for i, batch in enumerate(pbar):
             if i >= steps_per_epoch: break 
-            
-            # x_1: Target Data (画像) [B, C, H, W]
             images = batch["pixel_values"].to(device)
-            
-            # x_0: Paired Noise [B, D] (Flattened)
-            # ★重要修正★: 画像と同じ形状に reshape する必要があります
             noise = batch["noise"].to(device)
-            noise = noise.view_as(images)
+
+            if noise.numel() != images.numel():
+                raise ValueError(f"Noise dim {noise.shape} does not match Image dim {images.shape}. Check PCA vs Raw configs.")
             
-            # 条件 (テキスト埋め込み)
+            noise = noise.view_as(images)
             text_embeddings = condition_model(batch, device)
             
             optimizer.zero_grad()
-            
-            # SD-FM ロス計算
-            # 外部から供給された最適なペア (x_0, x_1) を使用
             loss = cfm.compute_loss_paired(model, x_0=noise, x_1=images, condition=text_embeddings)
             
             loss.backward()
@@ -104,8 +82,6 @@ def main():
             
             total_loss += loss.item()
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
-        
-        # エポック終了後の保存
         epoch_save_path = os.path.join(save_dir, f"model_epoch_{epoch+1}.pth")
         torch.save({
             'epoch': epoch + 1,

@@ -47,7 +47,7 @@ class SemidiscretePairingDataset(IterableDataset):
             batch_neg = []
             for idx in indices:
                 item = self.dataset[int(idx)]
-                batch_pixels.append(item["pixel_values"]) # T2IDataset準拠
+                batch_pixels.append(item["image"]) # 'image' に変更
                 batch_pos.append(item["positive_prompt"])
                 batch_neg.append(item["negative_prompt"])
                 
