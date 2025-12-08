@@ -26,9 +26,10 @@ class SemidiscretePairingDataset(IterableDataset):
         self.chunk_size = chunk_size
         self.dataset_features = dataset_features.to(device) 
         self.g = potential_g.to(device)
-        self.Y_sq_norm = torch.sum(self.dataset_features ** 2, dim=1) # [N]
+        
         self.pca_proj = pca_proj.to(device) if pca_proj is not None else None
         self.pca_mean = pca_mean.to(device) if pca_mean is not None else None
+        
         if self.pca_proj is not None:
             self.noise_dim = self.pca_proj.shape[0] 
         else:
@@ -42,12 +43,15 @@ class SemidiscretePairingDataset(IterableDataset):
             else:
                 X_feat = X_raw
             indices = self._get_indices_chunked(X_feat)
+            
             batch_pixels = []
             batch_pos = []
             batch_neg = []
+            
             for idx in indices:
                 item = self.dataset[int(idx)]
-                batch_pixels.append(item["image"]) # 'image' に変更
+                batch_pixels.append(item["image"]) 
+                
                 batch_pos.append(item["positive_prompt"])
                 batch_neg.append(item["negative_prompt"])
                 
@@ -62,21 +66,27 @@ class SemidiscretePairingDataset(IterableDataset):
         """
         メモリ節約のため、データセット側(Y)をチャンク分割して最大スコアを探索する。
         X_feat: [B, D]
+        Score = x^T y + g (内積コスト)
         """
         N = self.dataset_features.shape[0]
         B = X_feat.shape[0]
         
         best_scores = torch.full((B,), float('-inf'), device=self.device)
         best_indices = torch.zeros((B,), dtype=torch.long, device=self.device)
+        
         for i in range(0, N, self.chunk_size):
             end = min(i + self.chunk_size, N)
+            
             Y_chunk = self.dataset_features[i:end]   # [Chunk, D]
             g_chunk = self.g[i:end]                  # [Chunk]
-            Y_sq_chunk = self.Y_sq_norm[i:end]       # [Chunk]
-            cross_term = 2 * torch.matmul(X_feat, Y_chunk.t())
-            bias = g_chunk - Y_sq_chunk
+            
+            cross_term = torch.matmul(X_feat, Y_chunk.t())
+            bias = g_chunk
+            
             scores = cross_term + bias.unsqueeze(0) # [B, Chunk]
+            
             chunk_max_scores, chunk_max_indices = torch.max(scores, dim=1)
+            
             mask = chunk_max_scores > best_scores
             best_scores[mask] = chunk_max_scores[mask]
             best_indices[mask] = chunk_max_indices[mask] + i

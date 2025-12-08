@@ -6,6 +6,10 @@ class SemidiscreteOT_Solver:
     """
     SD-OTの双対変数(ポテンシャル) g を学習するソルバー。
     特徴量(PCA済み想定)を受け取り、Chunkingを用いて省メモリで学習する。
+    
+    [修正点]
+    論文 (arXiv:2509.25519) に従い、コスト関数を内積 c(x, y) = -x^T y として実装。
+    最大化対象のスコアは S(x, y_j) = x^T y_j + g_j となる。
     """
     def __init__(self, dataset_size, feature_dim, device, batch_size_noise=1024, lr=0.1, ema_decay=0.99):
         self.M = dataset_size
@@ -19,23 +23,23 @@ class SemidiscreteOT_Solver:
         self.target_weights = torch.full((self.M,), 1.0/self.M, device=device)
 
     def train_loop(self, flattened_dataset_tensor, num_iterations=20000, chunk_size=10000):
-        self.g.requires_grad_(False) # マニュアルで勾配計算するためFalse開始
+        self.g.requires_grad_(False) 
         Y = flattened_dataset_tensor.to(self.device)
-        Y_sq_norm = torch.sum(Y ** 2, dim=1) # [M]
 
         pbar = tqdm(range(num_iterations), desc="[Phase 1] Learning SD-OT Potential")
         
         for _ in pbar:
             X = torch.randn(self.batch_size_noise, self.D, device=self.device)
-            indices = self._get_argmax_indices_chunked(X, Y, Y_sq_norm, chunk_size)
+            indices = self._get_argmax_indices_chunked(X, Y, chunk_size)
             hits = torch.zeros(self.M, device=self.device)
             hits.scatter_add_(0, indices, torch.ones(self.batch_size_noise, device=self.device))
             grad = (hits / self.batch_size_noise) - self.target_weights
+            
             if self.g.grad is None: 
                 self.g.grad = torch.zeros_like(self.g)
             self.g.grad.copy_(-grad) 
             
-            self.g.requires_grad_(True) # stepのためにTrue
+            self.g.requires_grad_(True) 
             self.optimizer.step()
             self.g.requires_grad_(False)
             self.optimizer.zero_grad()
@@ -44,7 +48,11 @@ class SemidiscreteOT_Solver:
 
         return self.g_ema
 
-    def _get_argmax_indices_chunked(self, X, Y, Y_sq_norm, chunk_size):
+    def _get_argmax_indices_chunked(self, X, Y, chunk_size):
+        """
+        メモリ節約のため、データセット側(Y)をチャンク分割して最大スコアを探索する。
+        Score = x^T y + g (内積コストの場合)
+        """
         M = self.M
         B = X.shape[0]
         
@@ -54,16 +62,16 @@ class SemidiscreteOT_Solver:
         for i in range(0, M, chunk_size):
             end = min(i + chunk_size, M)
             
-            Y_chunk = Y[i:end]
-            g_chunk = self.g[i:end]
-            Y_sq_chunk = Y_sq_norm[i:end]
+            Y_chunk = Y[i:end]   # [Chunk, D]
+            g_chunk = self.g[i:end] # [Chunk]
             
-            cross_term = 2 * torch.matmul(X, Y_chunk.t())
-            bias = g_chunk 
-            scores = torch.matmul(X, Y_chunk.t()) + bias.unsqueeze(0)
+            
+            cross_term = torch.matmul(X, Y_chunk.t()) # Cross term: X * Y^T -> [B, Chunk]
+            bias = g_chunk
+            
+            scores = cross_term + bias.unsqueeze(0) # [B, Chunk]
             
             chunk_max_scores, chunk_max_indices = torch.max(scores, dim=1)
-            
             mask = chunk_max_scores > best_scores
             best_scores[mask] = chunk_max_scores[mask]
             best_indices[mask] = chunk_max_indices[mask] + i
