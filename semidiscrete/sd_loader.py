@@ -38,10 +38,12 @@ class SemidiscretePairingDataset(IterableDataset):
     def __iter__(self):
         while True:
             X_raw = torch.randn(self.batch_size, self.noise_dim, device=self.device)
+
             if self.pca_proj is not None:
-                X_feat = torch.matmul(X_raw - self.pca_mean, self.pca_proj)
+                X_feat = torch.matmul(X_raw, self.pca_proj)
             else:
                 X_feat = X_raw
+
             indices = self._get_indices_chunked(X_feat)
             
             batch_pixels = []
