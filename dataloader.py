@@ -6,12 +6,11 @@ from torch.utils.data import Dataset
 
 class T2IDataset(Dataset):
     """
-    (変更なし)
-    (前回の回答で 'negative_prompt' がなくても動作するように修正済み)
+  
     """
     def __init__(self, root_dir, metadata_file="metadata.csv", 
                  image_transform=None, 
-                 target_channels: int = 3): # ★ 変更点: target_channels を追加
+                 target_channels: int = 3):
         
         self.root_dir = root_dir
         self.image_dir = os.path.join(root_dir, "images")

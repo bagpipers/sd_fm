@@ -1,111 +1,84 @@
 import torch
 from torch.utils.data import IterableDataset
-import math
 
 class SemidiscretePairingDataset(IterableDataset):
     """
-    SD-FM用のデータセットラッパー。
-    学習済みポテンシャル g を使い、ランダムなノイズ x に対して
-    最適なデータ y (および条件 c) を割り当てて返す。
-    
-    これにより「画像とテキストの対応関係」を壊さずに、
-    「ノイズと画像の最適な幾何学的ペアリング」を実現する。
+    SD-FM用データセット。
+    1. ランダムノイズ x を生成 (Original Space)
+    2. PCA射影 (x -> x_pca)
+    3. チャンク分割して MIPS (Maximum Inner Product Search) を行い、最適なインデックス k を決定
+    4. オリジナルデータセットから k 番目の (画像, プロンプト) を取得して返す
     """
     def __init__(self, 
                  original_dataset, 
-                 potential_path: str,
-                 feature_dim: int,
-                 device: torch.device,
-                 batch_size: int = 64):
+                 potential_g, 
+                 dataset_features, 
+                 feature_dim, 
+                 device, 
+                 batch_size=64, 
+                 pca_proj=None, 
+                 pca_mean=None,
+                 chunk_size=10000):
         
         self.dataset = original_dataset
         self.device = device
         self.batch_size = batch_size
-        self.feature_dim = feature_dim
-        
-        # 学習済みポテンシャル g のロード
-        print(f"Loading potential from {potential_path}...")
-        self.g = torch.load(potential_path, map_location=device)
-        self.g.requires_grad_(False)
-        
-        # データセット全体をメモリに展開 (Precompute同様、高速検索のため)
-        # 注意: ImageNet等の超大規模データの場合は、Faiss等のMIPSライブラリを使うか
-        # Datasetをオンメモリに置く工夫が必要。
-        print("Loading full dataset into memory for pairing...")
-        self.all_images_flat = self._load_all_images(original_dataset).to(device)
-        
-        # 事前計算: ||y||^2
-        self.Y_sq_norm = torch.sum(self.all_images_flat ** 2, dim=1)
-
-    def _load_all_images(self, dataset):
-        # データセットから画像だけを取り出して [M, D] にする
-        # ※ dataset[i] が重い処理を含む場合、ここは時間がかかります
-        images = []
-        for i in range(len(dataset)):
-            item = dataset[i]
-            img = item["image"] # PIL or Tensor
-            if not isinstance(img, torch.Tensor):
-                 # Transformがdataset内で適用されていない場合の保険
-                 # 実際は T2IDataset で transform 済み Tensor が返る想定
-                 pass 
-            # [C, H, W] -> [D]
-            images.append(img.view(-1))
-        return torch.stack(images)
+        self.chunk_size = chunk_size
+        self.dataset_features = dataset_features.to(device) 
+        self.g = potential_g.to(device)
+        self.Y_sq_norm = torch.sum(self.dataset_features ** 2, dim=1) # [N]
+        self.pca_proj = pca_proj.to(device) if pca_proj is not None else None
+        self.pca_mean = pca_mean.to(device) if pca_mean is not None else None
+        if self.pca_proj is not None:
+            self.noise_dim = self.pca_proj.shape[0] 
+        else:
+            self.noise_dim = feature_dim
 
     def __iter__(self):
-        return self.generator()
-
-    def generator(self):
-        """
-        無限にバッチを生成するジェネレータ
-        """
         while True:
-            # 1. ノイズバッチ X ~ N(0, I)
-            X = torch.randn(self.batch_size, self.feature_dim, device=self.device)
-            
-            # 2. 最適なペア探索 (ASSIGN Algorithm)
-            # Score = g_j - ||y_j||^2 + 2 <x, y_j>
-            # 行列積: [B, D] @ [D, M] -> [B, M]
-            # ※ データ数Mが多い場合、ここをチャンク分割して計算する必要があります
-            cross_term = 2 * torch.matmul(X, self.all_images_flat.t())
-            bias = self.g - self.Y_sq_norm
-            scores = cross_term + bias.unsqueeze(0)
-            
-            # argmax でインデックス取得
-            # indices: [B] (各ノイズに対応するデータセット内のインデックス)
-            indices = torch.argmax(scores, dim=1).cpu().numpy()
-            
-            # 3. ペアデータの構築 (ここが重要)
-            # 取得したインデックスを使って、オリジナルのDatasetから
-            # 「画像」と「テキスト(条件)」をセットで取得する。
-            batch_images = []
-            batch_pos_prompts = []
-            batch_neg_prompts = []
-            
-            # 割り当てられたノイズはそのまま使う
-            batch_noise = X
-            
+            X_raw = torch.randn(self.batch_size, self.noise_dim, device=self.device)
+            if self.pca_proj is not None:
+                X_feat = torch.matmul(X_raw - self.pca_mean, self.pca_proj)
+            else:
+                X_feat = X_raw
+            indices = self._get_indices_chunked(X_feat)
+            batch_pixels = []
+            batch_pos = []
+            batch_neg = []
             for idx in indices:
-                # オリジナルデータセットから取得 (画像とテキストの対応は維持される)
                 item = self.dataset[int(idx)]
+                batch_pixels.append(item["pixel_values"]) # T2IDataset準拠
+                batch_pos.append(item["positive_prompt"])
+                batch_neg.append(item["negative_prompt"])
                 
-                # 画像 (ターゲット y1)
-                batch_images.append(item["image"])
-                
-                # テキスト条件
-                batch_pos_prompts.append(item["positive_prompt"])
-                batch_neg_prompts.append(item["negative_prompt"])
-            
-            # スタックして返す
-            pixel_values = torch.stack(batch_images)
-            
             yield {
-                "pixel_values": pixel_values,      # y1 (Data)
-                "noise": batch_noise,              # x0 (Matched Noise)
-                "positive_prompt": batch_pos_prompts,
-                "negative_prompt": batch_neg_prompts
+                "pixel_values": torch.stack(batch_pixels), # x_1 (Target Image)
+                "noise": X_raw,                            # x_0 (Paired Noise - Raw)
+                "positive_prompt": batch_pos,
+                "negative_prompt": batch_neg
             }
 
-    def __len__(self):
-        # IterableDataset なので近似的な長さを返す
-        return len(self.dataset)
+    def _get_indices_chunked(self, X_feat):
+        """
+        メモリ節約のため、データセット側(Y)をチャンク分割して最大スコアを探索する。
+        X_feat: [B, D]
+        """
+        N = self.dataset_features.shape[0]
+        B = X_feat.shape[0]
+        
+        best_scores = torch.full((B,), float('-inf'), device=self.device)
+        best_indices = torch.zeros((B,), dtype=torch.long, device=self.device)
+        for i in range(0, N, self.chunk_size):
+            end = min(i + self.chunk_size, N)
+            Y_chunk = self.dataset_features[i:end]   # [Chunk, D]
+            g_chunk = self.g[i:end]                  # [Chunk]
+            Y_sq_chunk = self.Y_sq_norm[i:end]       # [Chunk]
+            cross_term = 2 * torch.matmul(X_feat, Y_chunk.t())
+            bias = g_chunk - Y_sq_chunk
+            scores = cross_term + bias.unsqueeze(0) # [B, Chunk]
+            chunk_max_scores, chunk_max_indices = torch.max(scores, dim=1)
+            mask = chunk_max_scores > best_scores
+            best_scores[mask] = chunk_max_scores[mask]
+            best_indices[mask] = chunk_max_indices[mask] + i
+            
+        return best_indices.cpu().numpy()
