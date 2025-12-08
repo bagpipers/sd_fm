@@ -37,7 +37,7 @@ class SemidiscreteOT_Solver:
             
             if self.g.grad is None: 
                 self.g.grad = torch.zeros_like(self.g)
-            self.g.grad.copy_(-grad) 
+            self.g.grad.copy_(grad) 
             
             self.g.requires_grad_(True) 
             self.optimizer.step()
