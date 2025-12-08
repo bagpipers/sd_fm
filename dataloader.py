@@ -6,7 +6,8 @@ from torch.utils.data import Dataset
 
 class T2IDataset(Dataset):
     """
-  
+    画像とテキストプロンプトのペアを読み込むデータセット。
+    読み込みエラー時のスキップ処理を堅牢化。
     """
     def __init__(self, root_dir, metadata_file="metadata.csv", 
                  image_transform=None, 
@@ -48,36 +49,41 @@ class T2IDataset(Dataset):
         return len(self.metadata)
 
     def __getitem__(self, idx):
-        img_name = self.metadata.loc[idx, "image_file"]
-        img_path = os.path.join(self.image_dir, img_name)
-        try:
-            image = Image.open(img_path)
-        except FileNotFoundError:
-            print(f"Warning: Image file not found {img_path}. Skipping.")
-            return self.__getitem__((idx + 1) % len(self)) 
-        image = image.convert(self.convert_mode)
-
-        if self.image_transform:
-            image = self.image_transform(image)
-            
-        positive_prompt = self.metadata.loc[idx, "positive_prompt"]
+        max_retries = 10
+        current_idx = idx
         
-        if "negative_prompt" in self.metadata.columns:
-            negative_prompt = self.metadata.loc[idx, "negative_prompt"]
-        else:
-            negative_prompt = "" 
+        for _ in range(max_retries):
+            img_name = self.metadata.loc[current_idx, "image_file"]
+            img_path = os.path.join(self.image_dir, img_name)
             
-        return {
-            "image": image,
-            "positive_prompt": str(positive_prompt), 
-            "negative_prompt": str(negative_prompt)
-        }
+            try:
+                image = Image.open(img_path)
+                image.load() # ファイル破損チェックのためにデータを読み込む
+                image = image.convert(self.convert_mode)
+                if self.image_transform:
+                    image = self.image_transform(image)
+                
+                positive_prompt = self.metadata.loc[current_idx, "positive_prompt"]
+                if "negative_prompt" in self.metadata.columns:
+                    negative_prompt = self.metadata.loc[current_idx, "negative_prompt"]
+                else:
+                    negative_prompt = "" 
+                    
+                return {
+                    "image": image,
+                    "positive_prompt": str(positive_prompt), 
+                    "negative_prompt": str(negative_prompt)
+                }
 
+            except (FileNotFoundError, OSError, IOError) as e:
+                print(f"Warning: Failed to load image at {img_path} (idx={current_idx}): {e}. Skipping.")
+                current_idx = (current_idx + 1) % len(self)
+                continue
+        raise RuntimeError(f"Failed to load any valid image after {max_retries} retries starting from index {idx}.")
 
 
 class T2ICollate:
     """
-    
     バッチを辞書型にまとめるだけのシンプルなクラス
     """
     def __init__(self):
@@ -95,6 +101,6 @@ class T2ICollate:
         image_batch = torch.stack(images)
         return {
             "pixel_values": image_batch,
-            "positive_prompt": pos_prompts, # (★ 生の文字列リスト)
-            "negative_prompt": neg_prompts, # (★ 生の文字列リスト)
+            "positive_prompt": pos_prompts, 
+            "negative_prompt": neg_prompts, 
         }

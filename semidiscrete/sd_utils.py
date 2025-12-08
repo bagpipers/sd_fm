@@ -1,17 +1,64 @@
 import os
 import torch
-import torch.nn.functional as F
+import joblib
+import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from sklearn.decomposition import IncrementalPCA
+
 from .sd_solver import SemidiscreteOT_Solver
 from .sd_loader import SemidiscretePairingDataset
+
+class OnlinePCAProcessor:
+    """
+    Incremental PCA (IPCA) を使用し、メモリ爆発を防ぎながら学習・変換を行う。
+    sd_solver.py や sd_loader.py からも利用可能。
+    """
+    def __init__(self, n_components, device):
+        self.n_components = n_components
+        self.device = device
+        
+        self.pca = IncrementalPCA(n_components=n_components)
+        self.is_fitted = False
+
+    def fit_incremental(self, dataloader):
+        """
+        データローダーからバッチごとにデータを取得し、IPCAで学習する。
+        全データをメモリに展開しないため、省メモリ。
+        """
+        print(f"Fitting PCA incrementally (dim={self.n_components})...")
+        for batch in tqdm(dataloader, desc="PCA Fitting"):
+            
+            imgs = batch["pixel_values"]
+            x_flat = imgs.view(imgs.shape[0], -1).cpu().numpy()
+            self.pca.partial_fit(x_flat)
+        self.is_fitted = True
+        print("PCA fitting complete.")
+
+    def transform(self, x_tensor):
+        """
+        Tensor (on device) -> PCA Transform -> Tensor (on device)
+        x_tensor: [B, Raw_Dim]
+        """
+        if not self.is_fitted:
+            raise RuntimeError("PCA is not fitted yet.")
+        x_cpu = x_tensor.detach().cpu().numpy()
+        x_pca = self.pca.transform(x_cpu)
+        return torch.from_numpy(x_pca).to(self.device).float()
+
+    def save(self, path):
+        joblib.dump(self.pca, path)
+        print(f"PCA model saved to {path}")
+
+    def load(self, path):
+        self.pca = joblib.load(path)
+        self.is_fitted = True
+        print(f"PCA model loaded from {path}")
+
 
 class SD_Manager:
     """
     SD-FMの準備とデータローダー構築を行うマネージャー。
-    - PCAの計算と適用
-    - ポテンシャル(g)の学習またはロード
-    - SD-Loaderの構築
     """
     def __init__(self, config, device):
         self.config = config
@@ -21,11 +68,16 @@ class SD_Manager:
         os.makedirs(self.save_dir, exist_ok=True)
         
         self.potential_path = os.path.join(self.save_dir, "sd_potential.pt")
-        self.pca_matrix_path = os.path.join(self.save_dir, "pca_matrix.pt")
-        self.pca_mean_path = os.path.join(self.save_dir, "pca_mean.pt")
+        self.pca_model_path = os.path.join(self.save_dir, "pca_model.joblib")
+        self.features_cache_path = os.path.join(self.save_dir, "cached_features.pt")
+        
         self.raw_dim = config['data']['height'] * config['data']['width'] * config['data']['channels']
         self.use_pca = self.sd_config.get('use_pca', False)
         self.feature_dim = self.sd_config['pca_dim'] if self.use_pca else self.raw_dim
+        if self.use_pca:
+            self.pca_processor = OnlinePCAProcessor(self.feature_dim, device)
+        else:
+            self.pca_processor = None
 
     def prepare_dataloader(self, raw_dataset):
         print("\n=== [SD-FM Manager] Preparing Data & Potential... ===")
@@ -48,11 +100,6 @@ class SD_Manager:
             )
             torch.save(g_ema, self.potential_path)
             print(f"Potential saved to {self.potential_path}")
-        pca_proj = None
-        pca_mean = None
-        if self.use_pca:
-            pca_proj = torch.load(self.pca_matrix_path, map_location=self.device)
-            pca_mean = torch.load(self.pca_mean_path, map_location=self.device)
         sd_dataset = SemidiscretePairingDataset(
             original_dataset=raw_dataset,
             potential_g=g_ema,
@@ -60,8 +107,7 @@ class SD_Manager:
             feature_dim=self.feature_dim,
             device=self.device,
             batch_size=self.config['training']['batch_size'],
-            pca_proj=pca_proj,
-            pca_mean=pca_mean,
+            pca_processor=self.pca_processor, # 行列ではなくプロセッサを渡す
             chunk_size=self.sd_config.get('pairing_chunk_size', 10000)
         )
         
@@ -69,40 +115,44 @@ class SD_Manager:
 
     def _prepare_features(self, dataset):
         """
-        全画像を読み込み、Flattenし、必要ならPCAを学習・適用して返す。
+        IPCAを用いてメモリ爆発を回避しながら全画像の特徴量を抽出する。
         """
-        features_cache_path = os.path.join(self.save_dir, "cached_features.pt")
-        if os.path.exists(features_cache_path) and self.use_pca and os.path.exists(self.pca_matrix_path):
-            print(f"Loading cached features from {features_cache_path}")
-            return torch.load(features_cache_path, map_location="cpu") # 一旦CPUへ
+        if os.path.exists(self.features_cache_path):
+            if self.use_pca:
+                if os.path.exists(self.pca_model_path):
+                    print(f"Loading cached features and PCA model...")
+                    self.pca_processor.load(self.pca_model_path)
+                    return torch.load(self.features_cache_path, map_location="cpu")
+            else:
+                print(f"Loading cached raw features...")
+                return torch.load(self.features_cache_path, map_location="cpu")
 
-        print("Flattening dataset for feature extraction...")
-        temp_loader = DataLoader(dataset, batch_size=256, num_workers=8, shuffle=False)
-        all_tensors = []
-        
-        for batch in tqdm(temp_loader, desc="Loading Data"):
-            imgs = batch["pixel_values"] # T2IDatasetは pixel_values を返す
-            flat = imgs.view(imgs.shape[0], -1)
-            all_tensors.append(flat)
-        
-        full_tensor = torch.cat(all_tensors, dim=0) # [N, Raw_Dim]
-        
+        print("Extracting features from dataset...")
+        temp_loader = DataLoader(dataset, batch_size=256, num_workers=4, shuffle=False)
         if self.use_pca:
-            print(f"Computing PCA (dim={self.feature_dim})... This may take a while.")
-            device_calc = self.device if full_tensor.shape[0] < 50000 else "cpu" 
-            X = full_tensor.to(device_calc)
-            mean = torch.mean(X, dim=0)
-            X_centered = X - mean
-            U, S, V = torch.pca_lowrank(X_centered, q=self.feature_dim, center=False, niter=2)
-            features = torch.matmul(X_centered, V)
-            torch.save(V.to("cpu"), self.pca_matrix_path)
-            torch.save(mean.to("cpu"), self.pca_mean_path)
-            
-            print(f"PCA done. Features shape: {features.shape}")
-            features = features.cpu() # メモリ節約のため一旦CPU
-            torch.save(features, features_cache_path)
-            return features
-            
+            if not os.path.exists(self.pca_model_path):
+                self.pca_processor.fit_incremental(temp_loader)
+                self.pca_processor.save(self.pca_model_path)
+            else:
+                self.pca_processor.load(self.pca_model_path)
+            all_features = []
+            print("Transforming all data with PCA...")
+            for batch in tqdm(temp_loader, desc="PCA Transform"):
+                imgs = batch["pixel_values"]
+                flat = imgs.view(imgs.shape[0], -1) # [B, Raw]
+                feat = self.pca_processor.transform(flat) 
+                all_features.append(feat.cpu())
+                
+            full_tensor = torch.cat(all_features, dim=0) # [N, PCA_Dim]
         else:
-            print("PCA disabled. Using raw features.")
-            return full_tensor
+            print("Flattening raw features (No PCA)...")
+            all_tensors = []
+            for batch in tqdm(temp_loader, desc="Flattening"):
+                imgs = batch["pixel_values"]
+                flat = imgs.view(imgs.shape[0], -1)
+                all_tensors.append(flat.cpu()) # CPUへ退避
+            full_tensor = torch.cat(all_tensors, dim=0)
+        print(f"Saving features cache to {self.features_cache_path}")
+        torch.save(full_tensor, self.features_cache_path)
+        
+        return full_tensor

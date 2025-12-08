@@ -4,10 +4,10 @@ from torch.utils.data import IterableDataset
 class SemidiscretePairingDataset(IterableDataset):
     """
     SD-FM用データセット。
-    1. ランダムノイズ x を生成 (Original Space)
-    2. PCA射影 (x -> x_pca)
-    3. チャンク分割して MIPS (Maximum Inner Product Search) を行い、最適なインデックス k を決定
-    4. オリジナルデータセットから k 番目の (画像, プロンプト) を取得して返す
+    ユーザーの理想形:
+    - ノイズ x_raw (Raw Space) を生成して保持。
+    - PCAが必要な場合、pca_processorを使ってカップリング探索時のみ次元削減を行う。
+    - PCA関係のパラメータ(行列など)は個別に持たない。
     """
     def __init__(self, 
                  original_dataset, 
@@ -16,8 +16,7 @@ class SemidiscretePairingDataset(IterableDataset):
                  feature_dim, 
                  device, 
                  batch_size=64, 
-                 pca_proj=None, 
-                 pca_mean=None,
+                 pca_processor=None, # PCA専用関数/クラスを受け取る
                  chunk_size=10000):
         
         self.dataset = original_dataset
@@ -27,25 +26,21 @@ class SemidiscretePairingDataset(IterableDataset):
         self.dataset_features = dataset_features.to(device) 
         self.g = potential_g.to(device)
         
-        self.pca_proj = pca_proj.to(device) if pca_proj is not None else None
-        self.pca_mean = pca_mean.to(device) if pca_mean is not None else None
-        
-        if self.pca_proj is not None:
-            self.noise_dim = self.pca_proj.shape[0] 
+        self.pca_processor = pca_processor
+        if self.pca_processor is not None:
+            sample_img = self.dataset[0]["image"] # Tensor [C, H, W]
+            self.noise_dim = sample_img.numel()
         else:
             self.noise_dim = feature_dim
 
     def __iter__(self):
         while True:
             X_raw = torch.randn(self.batch_size, self.noise_dim, device=self.device)
-
-            if self.pca_proj is not None:
-                X_feat = torch.matmul(X_raw, self.pca_proj)
+            if self.pca_processor is not None:
+                X_feat = self.pca_processor.transform(X_raw)
             else:
                 X_feat = X_raw
-
             indices = self._get_indices_chunked(X_feat)
-            
             batch_pixels = []
             batch_pos = []
             batch_neg = []
@@ -53,13 +48,12 @@ class SemidiscretePairingDataset(IterableDataset):
             for idx in indices:
                 item = self.dataset[int(idx)]
                 batch_pixels.append(item["image"]) 
-                
                 batch_pos.append(item["positive_prompt"])
                 batch_neg.append(item["negative_prompt"])
                 
             yield {
                 "pixel_values": torch.stack(batch_pixels), # x_1 (Target Image)
-                "noise": X_raw,                            # x_0 (Paired Noise - Raw)
+                "noise": X_raw,                            # x_0 (Paired Noise - Raw: もとのx_rawを使う)
                 "positive_prompt": batch_pos,
                 "negative_prompt": batch_neg
             }
@@ -67,7 +61,8 @@ class SemidiscretePairingDataset(IterableDataset):
     def _get_indices_chunked(self, X_feat):
         """
         メモリ節約のため、データセット側(Y)をチャンク分割して最大スコアを探索する。
-        X_feat: [B, D]
+        X_feat: [B, D] (PCA済み)
+        Y_chunk: [Chunk, D] (PCA済み)
         Score = x^T y + g (内積コスト)
         """
         N = self.dataset_features.shape[0]
