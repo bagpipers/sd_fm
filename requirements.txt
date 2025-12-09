@@ -7,3 +7,4 @@ PyYAML
 Pillow
 numpy
 tqdm
+scikit-learn

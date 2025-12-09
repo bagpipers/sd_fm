@@ -111,7 +111,17 @@ class SD_Manager:
             chunk_size=self.sd_config.get('pairing_chunk_size', 10000)
         )
         
-        return DataLoader(sd_dataset, batch_size=None, num_workers=0)
+        num_workers = self.config['training'].get('num_workers', 0)
+        print(f"SD-FM Dataloader: num_workers={num_workers}")
+        persistent = (num_workers > 0)
+        
+        return DataLoader(
+            sd_dataset, 
+            batch_size=None,   # バッチ化はDataset内で行うためNone
+            num_workers=num_workers,
+            persistent_workers=persistent,
+            pin_memory=True    # GPU転送を高速化
+        )
 
     def _prepare_features(self, dataset):
         """
