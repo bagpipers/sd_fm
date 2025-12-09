@@ -68,8 +68,8 @@ class SemidiscretePairingDataset(IterableDataset):
                 batch_neg.append(item.get("negative_prompt", ""))
                 
             yield {
-                "pixel_values": torch.stack(batch_pixels), # [B, C, H, W]
-                "noise": X_raw,                            # [B, Dim] (x_0)
+                "image": torch.stack(batch_pixels),    # [B, C, H, W] Key unified to 'image'
+                "noise": X_raw,                        # [B, Dim] (x_0)
                 "positive_prompt": batch_pos,
                 "negative_prompt": batch_neg
             }
@@ -78,6 +78,7 @@ class SemidiscretePairingDataset(IterableDataset):
         """
         メモリ節約のため、データセット側(Y)をチャンク分割して最大スコアを探索する。
         全ての計算を CPU 上で行う。
+        Score = x^T y + g (内積コストの場合)
         """
         N = self.dataset_features.shape[0]
         B = X_feat.shape[0]
@@ -91,7 +92,9 @@ class SemidiscretePairingDataset(IterableDataset):
             g_chunk = self.g[i:end]                  # [Chunk] (CPU)
             cross_term = torch.matmul(X_feat, Y_chunk.t())
             scores = cross_term + g_chunk.unsqueeze(0) 
+            
             chunk_max_scores, chunk_max_indices = torch.max(scores, dim=1)
+            
             mask = chunk_max_scores > best_scores
             best_scores[mask] = chunk_max_scores[mask]
             best_indices[mask] = chunk_max_indices[mask] + i

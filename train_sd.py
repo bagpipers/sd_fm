@@ -7,8 +7,8 @@ from tqdm import tqdm
 from models.unet import TextConditionedUNet
 from models.conditioning import ConditioningModel 
 from dataloader import T2IDataset 
-from paths.ot_cfm_sd import PairedOTCFM       
 from semidiscrete.sd_utils import SD_Manager    
+from paths.ot_cfm_sd import PairedOTCFM       
 
 def main():
     config_path = "configs/config_sd.yaml"
@@ -25,7 +25,6 @@ def main():
     
     print(f"Loaded config from {config_path}")
     print(f"Save directory: {save_dir}")
-    
     img_channels = config['data']['channels']
     h, w = config['data']['height'], config['data']['width']
     transform = transforms.Compose([
@@ -58,19 +57,16 @@ def main():
     batch_size = config['training']['batch_size']
     steps_per_epoch = len(raw_dataset) // batch_size
     num_epochs = config['training']['num_epochs']
-    
     for epoch in range(num_epochs):
         pbar = tqdm(dataloader, total=steps_per_epoch, desc=f"Epoch {epoch+1}/{num_epochs}")
         total_loss = 0
         
         for i, batch in enumerate(pbar):
             if i >= steps_per_epoch: break 
-            images = batch["pixel_values"].to(device)
+            images = batch["image"].to(device) 
             noise = batch["noise"].to(device)
-
             if noise.numel() != images.numel():
                 raise ValueError(f"Noise dim {noise.shape} does not match Image dim {images.shape}. Check PCA vs Raw configs.")
-            
             noise = noise.view_as(images)
             text_embeddings = condition_model(batch, device)
             

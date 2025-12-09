@@ -28,8 +28,7 @@ class OnlinePCAProcessor:
         """
         print(f"Fitting PCA incrementally (dim={self.n_components})...")
         for batch in tqdm(dataloader, desc="PCA Fitting"):
-            
-            imgs = batch["pixel_values"]
+            imgs = batch["image"]
             x_flat = imgs.view(imgs.shape[0], -1).cpu().numpy()
             self.pca.partial_fit(x_flat)
         self.is_fitted = True
@@ -70,10 +69,10 @@ class SD_Manager:
         self.potential_path = os.path.join(self.save_dir, "sd_potential.pt")
         self.pca_model_path = os.path.join(self.save_dir, "pca_model.joblib")
         self.features_cache_path = os.path.join(self.save_dir, "cached_features.pt")
-        
         self.raw_dim = config['data']['height'] * config['data']['width'] * config['data']['channels']
         self.use_pca = self.sd_config.get('use_pca', False)
         self.feature_dim = self.sd_config['pca_dim'] if self.use_pca else self.raw_dim
+        
         if self.use_pca:
             self.pca_processor = OnlinePCAProcessor(self.feature_dim, device)
         else:
@@ -107,20 +106,19 @@ class SD_Manager:
             feature_dim=self.feature_dim,
             device=self.device,
             batch_size=self.config['training']['batch_size'],
-            pca_processor=self.pca_processor, # 行列ではなくプロセッサを渡す
+            pca_processor=self.pca_processor, 
             chunk_size=self.sd_config.get('pairing_chunk_size', 10000)
         )
         
         num_workers = self.config['training'].get('num_workers', 0)
         print(f"SD-FM Dataloader: num_workers={num_workers}")
         persistent = (num_workers > 0)
-        
         return DataLoader(
             sd_dataset, 
-            batch_size=None,   # バッチ化はDataset内で行うためNone
+            batch_size=None,   
             num_workers=num_workers,
             persistent_workers=persistent,
-            pin_memory=True    # GPU転送を高速化
+            pin_memory=True
         )
 
     def _prepare_features(self, dataset):
@@ -145,11 +143,12 @@ class SD_Manager:
                 self.pca_processor.save(self.pca_model_path)
             else:
                 self.pca_processor.load(self.pca_model_path)
+            
             all_features = []
             print("Transforming all data with PCA...")
             for batch in tqdm(temp_loader, desc="PCA Transform"):
-                imgs = batch["pixel_values"]
-                flat = imgs.view(imgs.shape[0], -1) # [B, Raw]
+                imgs = batch["image"]
+                flat = imgs.view(imgs.shape[0], -1) 
                 feat = self.pca_processor.transform(flat) 
                 all_features.append(feat.cpu())
                 
@@ -158,10 +157,11 @@ class SD_Manager:
             print("Flattening raw features (No PCA)...")
             all_tensors = []
             for batch in tqdm(temp_loader, desc="Flattening"):
-                imgs = batch["pixel_values"]
+                imgs = batch["image"]
                 flat = imgs.view(imgs.shape[0], -1)
-                all_tensors.append(flat.cpu()) # CPUへ退避
+                all_tensors.append(flat.cpu()) 
             full_tensor = torch.cat(all_tensors, dim=0)
+            
         print(f"Saving features cache to {self.features_cache_path}")
         torch.save(full_tensor, self.features_cache_path)
         
