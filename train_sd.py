@@ -32,15 +32,24 @@ def main():
         transforms.ToTensor(), 
         transforms.Normalize([0.5]*img_channels, [0.5]*img_channels)
     ])
+    
+    
+    num_classes = None
+    if config['model']['condition_type'] == 'class':
+        num_classes = config['model']['class_config']['num_classes']
+    
     raw_dataset = T2IDataset(
         root_dir=config['data']['root_dir'], 
         metadata_file=config['data']['metadata_file'], 
         image_transform=transform,
-        target_channels=img_channels 
+        target_channels=img_channels,
+        num_classes=num_classes 
     )
     print(f"Raw dataset size: {len(raw_dataset)}")
+    
     sd_manager = SD_Manager(config, device)
     dataloader = sd_manager.prepare_dataloader(raw_dataset)
+    
     condition_model = ConditioningModel(config).to(device)
     model = TextConditionedUNet(config).to(device)
     cfm = PairedOTCFM(sigma_min=1e-5)
@@ -66,8 +75,9 @@ def main():
             images = batch["image"].to(device) 
             noise = batch["noise"].to(device)
             if noise.numel() != images.numel():
-                raise ValueError(f"Noise dim {noise.shape} does not match Image dim {images.shape}. Check PCA vs Raw configs.")
+                raise ValueError(f"Noise dim {noise.shape} does not match Image dim {images.shape}.")
             noise = noise.view_as(images)
+            
             text_embeddings = condition_model(batch, device)
             
             optimizer.zero_grad()
@@ -78,6 +88,7 @@ def main():
             
             total_loss += loss.item()
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+        
         epoch_save_path = os.path.join(save_dir, f"model_epoch_{epoch+1}.pth")
         torch.save({
             'epoch': epoch + 1,

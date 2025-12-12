@@ -5,10 +5,6 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 class T2IDataset(Dataset):
-    """
-    画像とテキストプロンプトのペアを読み込むデータセット。
-    読み込みエラー時のスキップ処理を堅牢化。
-    """
     def __init__(self, root_dir, metadata_file="metadata.csv", 
                  image_transform=None, 
                  target_channels: int = 3):
@@ -24,10 +20,11 @@ class T2IDataset(Dataset):
         elif self.target_channels == 4:
             self.convert_mode = 'RGBA'
         else:
-            raise ValueError(f"Unsupported target_channels: {target_channels}. Must be 1, 3, or 4.")
+            raise ValueError(f"Unsupported target_channels: {target_channels}")
             
         metadata_path = os.path.join(root_dir, metadata_file)
         file_extension = os.path.splitext(metadata_path)[1].lower()
+        
         try:
             if file_extension == ".csv":
                 self.metadata = pd.read_csv(metadata_path)
@@ -37,70 +34,46 @@ class T2IDataset(Dataset):
                 raise ValueError(f"Unsupported metadata file format: {file_extension}")
         except FileNotFoundError:
             raise FileNotFoundError(f"Metadata file not found at: {metadata_path}")
-            
         if "image_file" not in self.metadata.columns:
             raise ValueError("metadataに 'image_file' カラムがありません。")
         if "positive_prompt" not in self.metadata.columns:
             raise ValueError("metadataに 'positive_prompt' カラムがありません。")
-        if "negative_prompt" not in self.metadata.columns:
-            print("Warning: 'negative_prompt' column not found. Using empty strings.")
 
     def __len__(self):
         return len(self.metadata)
 
     def __getitem__(self, idx):
-        max_retries = 10
-        current_idx = idx
+        img_name = self.metadata.loc[idx, "image_file"]
+        img_path = os.path.join(self.image_dir, img_name)
         
-        for _ in range(max_retries):
-            img_name = self.metadata.loc[current_idx, "image_file"]
-            img_path = os.path.join(self.image_dir, img_name)
+        try:
+            image = Image.open(img_path)
+            image.load() # ファイル破損チェック
+            image = image.convert(self.convert_mode)
+            positive_prompt = self.metadata.loc[idx, "positive_prompt"]
+            if "negative_prompt" in self.metadata.columns:
+                negative_prompt = self.metadata.loc[idx, "negative_prompt"]
+            else:
+                negative_prompt = ""
+
+        except (FileNotFoundError, OSError, IOError, ValueError) as e:
             
+            dummy_size = (256, 256) # 後でリサイズされるから大丈夫！
+            if self.target_channels == 1:
+                image = Image.new("L", dummy_size, color=255) # 白
+            else:
+                image = Image.new("RGB", dummy_size, color=(255, 255, 255)) # 白
+            positive_prompt = "error_placeholder_image" 
+            negative_prompt = "quality_image"
+        if self.image_transform:
             try:
-                image = Image.open(img_path)
-                image.load() # ファイル破損チェックのためにデータを読み込む
-                image = image.convert(self.convert_mode)
-                if self.image_transform:
-                    image = self.image_transform(image)
-                
-                positive_prompt = self.metadata.loc[current_idx, "positive_prompt"]
-                if "negative_prompt" in self.metadata.columns:
-                    negative_prompt = self.metadata.loc[current_idx, "negative_prompt"]
-                else:
-                    negative_prompt = "" 
-                    
-                return {
-                    "image": image,
-                    "positive_prompt": str(positive_prompt), 
-                    "negative_prompt": str(negative_prompt)
-                }
+                image = self.image_transform(image)
+            except Exception as e:
+                print(f"Critical Transform Error at {idx}: {e}")
+                raise e
 
-            except (FileNotFoundError, OSError, IOError) as e:
-                print(f"Warning: Failed to load image at {img_path} (idx={current_idx}): {e}. Skipping.")
-                current_idx = (current_idx + 1) % len(self)
-                continue
-        raise RuntimeError(f"Failed to load any valid image after {max_retries} retries starting from index {idx}.")
-
-
-class T2ICollate:
-    """
-    バッチを辞書型にまとめるだけのシンプルなクラス
-    """
-    def __init__(self):
-        pass
-
-    def __call__(self, batch):
-        images = []
-        pos_prompts = []
-        neg_prompts = []
-        
-        for item in batch:
-            images.append(item["image"])
-            pos_prompts.append(item["positive_prompt"])
-            neg_prompts.append(item["negative_prompt"])
-        image_batch = torch.stack(images)
         return {
-            "pixel_values": image_batch,
-            "positive_prompt": pos_prompts, 
-            "negative_prompt": neg_prompts, 
+            "image": image,
+            "positive_prompt": str(positive_prompt), 
+            "negative_prompt": str(negative_prompt)
         }

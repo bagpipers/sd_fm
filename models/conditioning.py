@@ -5,12 +5,13 @@ from typing import Dict, List
 
 class ConditioningModel(nn.Module):
     """
-    config.yaml の 'condition_type' に基づき、
-    'clip' (テキスト) または 'class' (nn.Embedding) の
-    条件付け埋め込みを生成するモジュール。
+    config.yaml の 'condition_type' に基づき、条件付け埋め込みを生成するモジュール。
     
-    CFG (Classifier-Free Guidance) のための
-    「条件ドロップ」ロジックも内包します。
+    [修正点]
+    'class' モード時、configの num_classes に対して自動的に2つのクラスを追加する。
+      - index = num_classes     : Trash Class (破損画像用、例: 1000)
+      - index = num_classes + 1 : Unconditional Token (CFG用、例: 1001)
+    これにより、ユーザーはconfigを書き換える必要がない。
     """
     def __init__(self, config: Dict):
         super().__init__()
@@ -39,26 +40,20 @@ class ConditioningModel(nn.Module):
 
         elif self.condition_type == "class":
             class_cfg = self.model_cfg['class_config']
-            self.num_classes = class_cfg['num_classes']
+            self.num_classes = class_cfg['num_classes'] 
             self.embed_dim = class_cfg['embed_dim']
+            self.trash_class_index = self.num_classes
+            self.uncond_class_index = self.num_classes + 1
+            self.embedding = nn.Embedding(self.num_classes + 2, self.embed_dim)
             
-            self.embedding = nn.Embedding(self.num_classes + 1, self.embed_dim)
-            self.uncond_class_index = self.num_classes
+            print(f"  - Class Embedding Size: {self.num_classes + 2}")
+            print(f"  - Trash Class Index: {self.trash_class_index}")
+            print(f"  - Uncond Class Index: {self.uncond_class_index}")
         
         else:
             raise ValueError(f"Unknown condition_type: {self.condition_type}")
 
     def forward(self, batch: Dict, device: torch.device) -> torch.Tensor:
-        """
-        Dataloaderから受け取ったバッチを処理し、
-        CFGドロップを適用した後の条件付け埋め込み
-        [B, Seq, Dim] を返す。
-        
-        self.training == True (訓練時):
-            cfg_drop_prob に基づき、ランダムにドロップ (無条件化) する。
-        self.training == False (推論時):
-            ドロップせず、条件付き埋め込みのみを返す。
-        """
         b = batch["pixel_values"].shape[0]
         if self.training:
             drop_mask = (torch.rand(b, device=device) < self.cfg_drop_prob)
@@ -69,27 +64,24 @@ class ConditioningModel(nn.Module):
             return self._forward_clip(batch, drop_mask, device)
         elif self.condition_type == "class":
             return self._forward_class(batch, drop_mask, device)
+
     @torch.no_grad()
     def get_uncond_embedding(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        """
-        CFG推論 (sample.py) のために、
-        無条件 (Unconditional) 埋め込み [B, Seq, Dim] を返す。
-        """
         if self.condition_type == "clip":
             return self.uncond_embedding.expand(batch_size, -1, -1)
         
         elif self.condition_type == "class":
             labels = torch.full(
                 (batch_size,), 
-                self.uncond_class_index, 
+                self.uncond_class_index, # 例: 1001
                 dtype=torch.long, 
                 device=device
             )
             return self.embedding(labels).unsqueeze(1)
 
     def _forward_clip(self, batch: Dict, drop_mask: torch.Tensor, device: torch.device):
-        """ 'clip' モードのフォワード + CFG """
         prompts = batch["positive_prompt"]
+        b = len(prompts)
         
         tokens = self.tokenizer(
             prompts,
@@ -102,7 +94,7 @@ class ConditioningModel(nn.Module):
             text_embeddings = self.text_encoder(
                 input_ids=tokens.input_ids,
                 attention_mask=tokens.attention_mask
-            ).last_hidden_state # [B, 77, 768]
+            ).last_hidden_state 
         uncond_embeds = self.uncond_embedding.expand(b, -1, -1)
         
         mask_view = drop_mask.view(-1, 1, 1)
@@ -111,7 +103,6 @@ class ConditioningModel(nn.Module):
         return final_embeddings
 
     def _forward_class(self, batch: Dict, drop_mask: torch.Tensor, device: torch.device):
-        """ 'class' モードのフォワード + CFG """
         try:
             labels = torch.tensor(
                 [int(p) for p in batch["positive_prompt"]], 
@@ -120,7 +111,8 @@ class ConditioningModel(nn.Module):
             )
         except ValueError:
             raise ValueError(f"In 'class' mode, positive_prompt must be convertible to int. Got: {batch['positive_prompt']}")
-        uncond_label = self.uncond_class_index
+        
+        uncond_label = self.uncond_class_index # 例: 1001
         
         final_labels = torch.where(drop_mask, uncond_label, labels)
         final_embeddings = self.embedding(final_labels)

@@ -38,11 +38,24 @@ class OnlinePCAProcessor:
         """
         Tensor (on device) -> PCA Transform -> Tensor (on device)
         x_tensor: [B, Raw_Dim]
+        
+        [修正点 1]
+        SklearnのPCA.transformは自動的に平均を引く(中心化)が、SD-FMの理論上、
+        ゼロ平均のノイズと整合性を取るため、画像側も平均を引かずに回転のみを行う。
         """
         if not self.is_fitted:
             raise RuntimeError("PCA is not fitted yet.")
         x_cpu = x_tensor.detach().cpu().numpy()
-        x_pca = self.pca.transform(x_cpu)
+        
+        # --- 変更前: self.pca.transform(x_cpu) (平均引きが発生する) ---
+        # x_pca = self.pca.transform(x_cpu)
+        
+        # --- 変更後: 平均を引かずに回転行列(components_)のみを適用する ---
+        # components_: [n_components, n_features]
+        # x_cpu: [batch, n_features]
+        # Result: [batch, n_components]
+        x_pca = np.dot(x_cpu, self.pca.components_.T)
+        
         return torch.from_numpy(x_pca).to(self.device).float()
 
     def save(self, path):
@@ -130,10 +143,15 @@ class SD_Manager:
                 if os.path.exists(self.pca_model_path):
                     print(f"Loading cached features and PCA model...")
                     self.pca_processor.load(self.pca_model_path)
-                    return torch.load(self.features_cache_path, map_location="cpu")
+                    features = torch.load(self.features_cache_path, map_location="cpu")
+                    # [修正点 2] キャッシュ読み込み時も共有メモリ化しておく
+                    features.share_memory_()
+                    return features
             else:
                 print(f"Loading cached raw features...")
-                return torch.load(self.features_cache_path, map_location="cpu")
+                features = torch.load(self.features_cache_path, map_location="cpu")
+                features.share_memory_()
+                return features
 
         print("Extracting features from dataset...")
         temp_loader = DataLoader(dataset, batch_size=256, num_workers=4, shuffle=False)
@@ -164,5 +182,7 @@ class SD_Manager:
             
         print(f"Saving features cache to {self.features_cache_path}")
         torch.save(full_tensor, self.features_cache_path)
+        
+        full_tensor.share_memory_()
         
         return full_tensor
