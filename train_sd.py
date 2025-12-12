@@ -43,7 +43,7 @@ def main():
         metadata_file=config['data']['metadata_file'], 
         image_transform=transform,
         target_channels=img_channels,
-        num_classes=num_classes 
+        
     )
     print(f"Raw dataset size: {len(raw_dataset)}")
     

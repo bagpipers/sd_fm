@@ -105,6 +105,7 @@ class SemidiscretePairingDataset(IterableDataset):
             noise_feat = self._project_to_feature_space(noise_high_dim)
             indices = self._search_best_pairings(noise_feat)
             batch_data = self._fetch_batch_data(indices)
+            
             yield {
                 "image": batch_data["images"],            # x_1 (Target Data)
                 "noise": noise_high_dim,                  # x_0 (Source Noise)
@@ -149,7 +150,7 @@ class SemidiscretePairingDataset(IterableDataset):
         Returns:
             np.ndarray: 各クエリに対応する最適なデータセットインデックス。 [Batch]
         """
-        
+
         num_data = self.dataset_features.shape[0]
         batch_size = query_noise.shape[0]
         best_scores = torch.full((batch_size,), float('-inf'), device=self.device)
