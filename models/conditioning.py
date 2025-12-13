@@ -103,16 +103,22 @@ class ConditioningModel(nn.Module):
         return final_embeddings
 
     def _forward_class(self, batch: Dict, drop_mask: torch.Tensor, device: torch.device):
-        try:
-            labels = torch.tensor(
-                [int(p) for p in batch["positive_prompt"]], 
-                dtype=torch.long, 
-                device=device
-            )
-        except ValueError:
-            raise ValueError(f"In 'class' mode, positive_prompt must be convertible to int. Got: {batch['positive_prompt']}")
+        if "class_id" in batch:
+            labels = batch["class_id"].to(device, dtype=torch.long)
+        else:
+            try:
+                labels = torch.tensor(
+                    [int(p) for p in batch["positive_prompt"]], 
+                    dtype=torch.long, 
+                    device=device
+                )
+            except ValueError:
+                raise KeyError(
+                    "condition_type='class' is selected, but 'class_id' is missing in batch "
+                    "and 'positive_prompt' contains non-integer strings."
+                )
         
-        uncond_label = self.uncond_class_index # 例: 1001
+        uncond_label = self.uncond_class_index
         
         final_labels = torch.where(drop_mask, uncond_label, labels)
         final_embeddings = self.embedding(final_labels)

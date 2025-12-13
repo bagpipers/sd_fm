@@ -34,10 +34,14 @@ class T2IDataset(Dataset):
                 raise ValueError(f"Unsupported metadata file format: {file_extension}")
         except FileNotFoundError:
             raise FileNotFoundError(f"Metadata file not found at: {metadata_path}")
+        
         if "image_file" not in self.metadata.columns:
             raise ValueError("metadataに 'image_file' カラムがありません。")
         if "positive_prompt" not in self.metadata.columns:
             raise ValueError("metadataに 'positive_prompt' カラムがありません。")
+            
+        
+        self.has_class_id = "class_id" in self.metadata.columns
 
     def __len__(self):
         return len(self.metadata)
@@ -48,7 +52,7 @@ class T2IDataset(Dataset):
         
         try:
             image = Image.open(img_path)
-            image.load() # ファイル破損チェック
+            image.load() 
             image = image.convert(self.convert_mode)
             positive_prompt = self.metadata.loc[idx, "positive_prompt"]
             if "negative_prompt" in self.metadata.columns:
@@ -57,14 +61,14 @@ class T2IDataset(Dataset):
                 negative_prompt = ""
 
         except (FileNotFoundError, OSError, IOError, ValueError) as e:
-            
-            dummy_size = (256, 256) # 後でリサイズされるから大丈夫！
+            dummy_size = (256, 256) 
             if self.target_channels == 1:
-                image = Image.new("L", dummy_size, color=255) # 白
+                image = Image.new("L", dummy_size, color=255) 
             else:
-                image = Image.new("RGB", dummy_size, color=(255, 255, 255)) # 白
+                image = Image.new("RGB", dummy_size, color=(255, 255, 255)) 
             positive_prompt = "error_placeholder_image" 
             negative_prompt = "quality_image"
+        
         if self.image_transform:
             try:
                 image = self.image_transform(image)
@@ -72,8 +76,21 @@ class T2IDataset(Dataset):
                 print(f"Critical Transform Error at {idx}: {e}")
                 raise e
 
-        return {
+        
+        data_item = {
             "image": image,
             "positive_prompt": str(positive_prompt), 
             "negative_prompt": str(negative_prompt)
         }
+
+        if self.has_class_id:
+            
+            class_id_val = self.metadata.loc[idx, "class_id"]
+            
+            if pd.isna(class_id_val):
+              
+                data_item["class_id"] = 0 
+            else:
+                data_item["class_id"] = int(class_id_val)
+
+        return data_item

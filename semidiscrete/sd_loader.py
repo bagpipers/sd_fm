@@ -105,13 +105,21 @@ class SemidiscretePairingDataset(IterableDataset):
             noise_feat = self._project_to_feature_space(noise_high_dim)
             indices = self._search_best_pairings(noise_feat)
             batch_data = self._fetch_batch_data(indices)
-            
-            yield {
+          
+            yield_dict = {
                 "image": batch_data["images"],            # x_1 (Target Data)
                 "noise": noise_high_dim,                  # x_0 (Source Noise)
                 "positive_prompt": batch_data["pos_prompts"],
                 "negative_prompt": batch_data["neg_prompts"]
             }
+
+            
+            if "class_ids" in batch_data:
+                
+                yield_dict["class_id"] = batch_data["class_ids"]
+
+            yield yield_dict
+
 
     def _generate_high_dim_noise(self) -> torch.Tensor:
         """
@@ -172,25 +180,34 @@ class SemidiscretePairingDataset(IterableDataset):
     def _fetch_batch_data(self, indices: np.ndarray) -> Dict[str, List]:
         """
         決定されたインデックスリストに基づき、データセットから実際のデータ(画像、プロンプト)を取得する。
-
-        Args:
-            indices (np.ndarray): データセットのインデックス配列。
-
-        Returns:
-            Dict: 画像スタックとプロンプトのリストを含む辞書。
         """
         images = []
         pos_prompts = []
         neg_prompts = []
+        
+        class_ids = []
+        has_class_id = False
 
         for idx in indices:
             item = self.dataset[int(idx)]
             images.append(item["image"]) 
             pos_prompts.append(str(item["positive_prompt"]))
             neg_prompts.append(str(item.get("negative_prompt", "")))
+           
 
-        return {
+            if "class_id" in item:
+                class_ids.append(item["class_id"])
+                has_class_id = True
+
+        result = {
             "images": torch.stack(images),
             "pos_prompts": pos_prompts,
             "neg_prompts": neg_prompts
         }
+        
+       
+        if has_class_id:
+
+            result["class_ids"] = torch.tensor(class_ids, dtype=torch.long)
+            
+        return result
