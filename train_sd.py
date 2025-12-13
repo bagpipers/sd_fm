@@ -13,8 +13,8 @@ from paths.ot_cfm_sd import PairedOTCFM
 def main():
     config_path = "configs/config_sd.yaml"
     if not os.path.exists(config_path):
-        print(f"Warning: {config_path} not found. Falling back to configs/config.yaml")
-        config_path = "configs/config.yaml"
+        print(f"Warning: {config_path} not found.")
+        
         
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
