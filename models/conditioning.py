@@ -54,7 +54,10 @@ class ConditioningModel(nn.Module):
             raise ValueError(f"Unknown condition_type: {self.condition_type}")
 
     def forward(self, batch: Dict, device: torch.device) -> torch.Tensor:
-        b = batch["pixel_values"].shape[0]
+        # [修正] train_sd.py (sd_loader) は "image" をキーとして使用するため修正
+        # 元コード: b = batch["pixel_values"].shape[0]
+        b = batch["image"].shape[0]
+
         if self.training:
             drop_mask = (torch.rand(b, device=device) < self.cfg_drop_prob)
         else:

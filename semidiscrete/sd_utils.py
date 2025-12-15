@@ -2,7 +2,7 @@ import os
 import torch
 import joblib
 import numpy as np
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader,Dataset
 from tqdm import tqdm
 from sklearn.decomposition import IncrementalPCA
 from typing import Optional

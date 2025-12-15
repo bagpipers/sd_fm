@@ -4,8 +4,8 @@ device: "cuda"
 
 data:
   root_dir: "/mnt/k/2025/imagenet_dataset"
-  height: 64        
-  width: 64        
+  height: 256        
+  width: 256        
   channels: 3   
   metadata_file: "metadata.csv" 
 
@@ -32,10 +32,10 @@ sampling:
   guidance_scale: 7.5 
 
 training:
-  batch_size: 64  # FM学習時のバッチサイズ
+  batch_size: 4  # FM学習時のバッチサイズ
   lr: 1.0e-4
   cfg_drop_prob: 0.1 
-  num_epochs: 100     
+  num_epochs: 10     
   num_workers: 8
   save_dir: "outputs/sd_fm_experiment"
 
@@ -43,7 +43,7 @@ training:
 sd_config:
   # PCA次元削減 (論文では500推奨)
   use_pca: true
-  pca_dim: 500
+  pca_dim: 2000
   
   # SD-OT (ポテンシャル学習) の設定
   potential_lr: 1000.0  # 論文推奨: データ数Nに応じて調整 (例: 10^3)
