@@ -27,10 +27,12 @@ def main():
     print(f"Save directory: {save_dir}")
     img_channels = config['data']['channels']
     h, w = config['data']['height'], config['data']['width']
+
     transform = transforms.Compose([
-        transforms.Resize((h, w)), 
-        transforms.ToTensor(), 
-        transforms.Normalize([0.5]*img_channels, [0.5]*img_channels)
+            transforms.Resize(max(h, w)), 
+            transforms.CenterCrop((h, w)),
+            transforms.ToTensor(), 
+            transforms.Normalize([0.5]*img_channels, [0.5]*img_channels)
     ])
     
     

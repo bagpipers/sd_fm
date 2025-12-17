@@ -4,8 +4,8 @@ device: "cuda"
 
 data:
   root_dir: "/mnt/k/2025/imagenet_dataset"
-  height: 256        
-  width: 256        
+  height: 128        
+  width: 128        
   channels: 3   
   metadata_file: "metadata.csv" 
 
@@ -43,7 +43,7 @@ training:
 sd_config:
   # PCA次元削減 (論文では500推奨)
   use_pca: true
-  pca_dim: 2000
+  pca_dim: 700
   
   # SD-OT (ポテンシャル学習) の設定
   potential_lr: 1000.0  # 論文推奨: データ数Nに応じて調整 (例: 10^3)
