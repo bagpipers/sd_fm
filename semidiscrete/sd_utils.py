@@ -2,13 +2,12 @@ import os
 import torch
 import joblib
 import numpy as np
+import json
 import shutil
-import tempfile
-import re
 from torch.utils.data import DataLoader, Dataset, Subset
 from tqdm import tqdm
 from sklearn.decomposition import IncrementalPCA
-from typing import Optional, List
+from typing import Optional
 
 from .sd_solver import SemidiscreteOT_Solver
 from .sd_loader import SemidiscretePairingDataset
@@ -23,80 +22,73 @@ class OnlinePCAProcessor:
         self.pca = IncrementalPCA(n_components=n_components)
         self.is_fitted = False
 
-    def fit_incremental(self, dataset: Dataset, batch_size: int, num_workers: int, checkpoint_path: Optional[str] = None, save_interval: int = 100):
-        """
-        DataLoaderを引数ではなく、Datasetを受け取り、内部でSubsetを使って高速にレジュームするように変更
-        """
-        start_batch_idx = 0
+    def fit_incremental(self, dataset: Dataset, batch_size: int, num_workers: int, checkpoint_path: Optional[str] = None, save_interval: int = 5000):
         if checkpoint_path and os.path.exists(checkpoint_path):
             print(f"Resuming PCA fitting from {checkpoint_path}...")
             try:
-                checkpoint = joblib.load(checkpoint_path)
-                self.pca = checkpoint['pca']
-                start_batch_idx = checkpoint['batch_idx']
-                print(f" -> Resuming from batch index {start_batch_idx}")
+                self.pca = joblib.load(checkpoint_path)
             except Exception as e:
                 print(f" -> Failed to load checkpoint: {e}. Starting from scratch.")
-        
+        samples_seen = self.pca.n_samples_seen_ if hasattr(self.pca, 'n_samples_seen_') else 0
         total_samples = len(dataset)
-        start_sample_idx = start_batch_idx * batch_size
         
-        if start_sample_idx >= total_samples:
-            print("PCA fitting already completed according to checkpoint.")
+        if samples_seen >= total_samples:
+            print(f"PCA fitting already completed (seen {samples_seen}/{total_samples} samples).")
             self.is_fitted = True
             return
-            
-        remaining_indices = range(start_sample_idx, total_samples)
+
+        print(f"Fitting PCA incrementally... Resuming from sample {samples_seen}")
+        
+        remaining_indices = range(samples_seen, total_samples)
         subset = Subset(dataset, remaining_indices)
         dataloader = DataLoader(subset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
 
-        print(f"Fitting PCA incrementally (dim={self.n_components})...")
         buffer_list = []
         buffer_size = 0
         min_batch_size = self.n_components 
-        next_save_target = start_batch_idx + save_interval
+        samples_since_save = 0
 
-        for i_local, batch in enumerate(tqdm(dataloader, desc="PCA Fitting")):
-            current_batch_idx = start_batch_idx + i_local
-            
+        for batch in tqdm(dataloader, desc="PCA Fitting"):
             imgs = batch["image"]
-            x_flat = imgs.view(imgs.shape[0], -1).cpu().numpy()
+            current_batch_size = imgs.shape[0]
+            
+            x_flat = imgs.view(current_batch_size, -1).numpy()
             
             buffer_list.append(x_flat)
-            buffer_size += x_flat.shape[0]
+            buffer_size += current_batch_size
+            samples_since_save += current_batch_size
+            
             if buffer_size >= min_batch_size:
                 X_batch = np.concatenate(buffer_list, axis=0)
                 self.pca.partial_fit(X_batch)
                 buffer_list = []
                 buffer_size = 0
-                if checkpoint_path and (current_batch_idx + 1) >= next_save_target:
-                    self._save_checkpoint(checkpoint_path, current_batch_idx + 1)
-                    next_save_target = (current_batch_idx + 1) + save_interval
+                
+                if checkpoint_path and samples_since_save >= save_interval:
+                    self._save_checkpoint(checkpoint_path)
+                    samples_since_save = 0
+
         if buffer_size > 0:
             X_batch = np.concatenate(buffer_list, axis=0)
             if buffer_size >= self.n_components or self.pca.n_samples_seen_ > 0:
                  self.pca.partial_fit(X_batch)
+        
         if checkpoint_path:
-            self._save_checkpoint(checkpoint_path, start_batch_idx + len(dataloader))
+            self._save_checkpoint(checkpoint_path)
 
         self.is_fitted = True
         print("PCA fitting complete.")
 
-    def _save_checkpoint(self, path, batch_idx):
-        """アトミック書き込みでチェックポイントを保存"""
-        checkpoint = {
-            'pca': self.pca,
-            'batch_idx': batch_idx
-        }
-        dir_name = os.path.dirname(path)
-        with tempfile.NamedTemporaryFile(delete=False, dir=dir_name, suffix='.tmp') as tmp_file:
-            joblib.dump(checkpoint, tmp_file.name)
-            tmp_name = tmp_file.name
-        
-        if tmp_name:
-            os.replace(tmp_name, path)
+    def _save_checkpoint(self, path):
+        temp_path = path + ".tmp"
+        joblib.dump(self.pca, temp_path)
+        if os.path.exists(temp_path):
+            os.replace(temp_path, path)
 
     def transform(self, x_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        学習・推論時用: Tensorを受け取り、GPU Tensorを返す。
+        """
         if not self.is_fitted:
             raise RuntimeError("PCA is not fitted yet.")
         
@@ -104,6 +96,15 @@ class OnlinePCAProcessor:
         x_pca = np.dot(x_cpu, self.pca.components_.T)
         
         return torch.from_numpy(x_pca).to(self.device).float()
+
+    def transform_numpy(self, x_numpy: np.ndarray) -> np.ndarray:
+        """
+        【追加】データ前処理用: NumPyを受け取り、NumPyを返す。
+        GPU転送を行わないため、ディスク保存処理などで高速。
+        """
+        if not self.is_fitted:
+            raise RuntimeError("PCA is not fitted yet.")
+        return np.dot(x_numpy, self.pca.components_.T)
 
     def get_components_tensor(self) -> torch.Tensor:
         if not self.is_fitted:
@@ -128,9 +129,11 @@ class SD_Manager:
         
         self.save_dir = config['training'].get('save_dir', 'outputs')
         os.makedirs(self.save_dir, exist_ok=True)
+        
         self.potential_path = os.path.join(self.save_dir, "sd_potential.pt")
         self.pca_model_path = os.path.join(self.save_dir, "pca_model.joblib")
         self.features_cache_path = os.path.join(self.save_dir, "cached_features.pt")
+        
         self.raw_dim = config['data']['height'] * config['data']['width'] * config['data']['channels']
         self.use_pca = self.sd_config.get('use_pca', False)
         self.feature_dim = self.sd_config['pca_dim'] if self.use_pca else self.raw_dim
@@ -144,6 +147,7 @@ class SD_Manager:
         print("\n=== [SD-FM Manager] Preparing Data & Potential... ===")
         features_tensor = self._prepare_features(raw_dataset)
         potential_g = self._prepare_potential(features_tensor, len(raw_dataset))
+        
         pca_components_tensor = None
         if self.use_pca and self.pca_processor is not None:
             pca_components_tensor = self.pca_processor.get_components_tensor()
@@ -157,6 +161,7 @@ class SD_Manager:
             pca_components=pca_components_tensor.cpu() if pca_components_tensor is not None else None,
             chunk_size=self.sd_config.get('pairing_chunk_size', 10000)
         )
+        
         num_workers = self.config['training'].get('num_workers', 0)
         print(f"SD-FM Dataloader created. (num_workers={num_workers})")
         
@@ -191,122 +196,89 @@ class SD_Manager:
 
 
     def _prepare_features(self, dataset: Dataset) -> torch.Tensor:
+        """
+        全画像の特徴量を抽出し、キャッシュする。
+        【最適化済み】NumPy (mmap) を活用し、無駄なGPU転送を回避。
+        """
         if os.path.exists(self.features_cache_path):
-            if self.use_pca:
+            if self.use_pca and not self.pca_processor.is_fitted:
                 if os.path.exists(self.pca_model_path):
-                    print(f"Loading cached features and PCA model...")
+                    print("Loading PCA model for cached features...")
                     self.pca_processor.load(self.pca_model_path)
-                    features = torch.load(self.features_cache_path, map_location="cpu")
-                    features.share_memory_() 
-                    return features
-            else:
-                print(f"Loading cached raw features...")
-                features = torch.load(self.features_cache_path, map_location="cpu")
-                features.share_memory_()
-                return features
+            
+            print(f"Loading cached features from {self.features_cache_path}")
+            features = torch.load(self.features_cache_path, map_location="cpu")
+            features.share_memory_()
+            return features
 
         print("Extracting features from dataset...")
-        pca_ckpt_path = os.path.join(self.save_dir, "pca_fit_checkpoint.joblib")
-        feat_chunks_dir = os.path.join(self.save_dir, "feature_chunks_temp")
-        os.makedirs(feat_chunks_dir, exist_ok=True)
         
-        batch_size = 256 # 固定 (※注意: レジュームの整合性のため、この値は変更しないでください)
-        num_workers = 4
         if self.use_pca:
             if not os.path.exists(self.pca_model_path):
+                fit_batch_size = 256 
                 self.pca_processor.fit_incremental(
                     dataset, 
-                    batch_size=batch_size, 
-                    num_workers=num_workers, 
-                    checkpoint_path=pca_ckpt_path, 
-                    save_interval=100
+                    batch_size=fit_batch_size, 
+                    num_workers=4, 
+                    checkpoint_path=os.path.join(self.save_dir, "pca_checkpoint_fit.joblib")
                 )
                 self.pca_processor.save(self.pca_model_path)
-                if os.path.exists(pca_ckpt_path):
-                    os.remove(pca_ckpt_path)
             else:
                 self.pca_processor.load(self.pca_model_path)
-        existing_chunks = [f for f in os.listdir(feat_chunks_dir) if f.startswith("chunk_") and f.endswith(".pt")]
-        start_batch_idx = 0
 
-        if existing_chunks:
-            indices = sorted([int(f.split('_')[1].split('.')[0]) for f in existing_chunks])
-            expected_idx = 0
-            valid_until = -1
-            for idx in indices:
-                if idx == expected_idx:
-                    valid_until = idx
-                    expected_idx += 1
-                else:
-                    break # 連続性が途切れたらそこで終了
-            
-            if valid_until >= 0:
-                start_batch_idx = valid_until + 1
-                print(f"Resuming feature transformation from batch {start_batch_idx} (contiguous).")
-            else:
-                print("Found chunks but sequence is broken from the start. Starting from 0.")
-                start_batch_idx = 0
-
-        print("Transforming all data...")
         total_samples = len(dataset)
-        start_sample_idx = start_batch_idx * batch_size
+        temp_mmap_path = os.path.join(self.save_dir, "features_temp.mmap")
+        progress_path = os.path.join(self.save_dir, "features_progress.json")
+        mode = 'r+' if os.path.exists(temp_mmap_path) else 'w+'
+        mmap_features = np.memmap(temp_mmap_path, dtype='float32', mode=mode, shape=(total_samples, self.feature_dim))
         
-        if start_sample_idx < total_samples:
-            remaining_indices = range(start_sample_idx, total_samples)
-            subset = Subset(dataset, remaining_indices)
-            transform_loader = DataLoader(subset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+        processed_count = 0
+        if os.path.exists(progress_path):
+            try:
+                with open(progress_path, 'r') as f:
+                    data = json.load(f)
+                    processed_count = data.get("processed_count", 0)
+                print(f"Resuming feature extraction from sample {processed_count}...")
+            except:
+                print("Failed to load progress file. Starting from 0.")
+        
+        if processed_count < total_samples:
+            subset = Subset(dataset, range(processed_count, total_samples))
+            transform_batch_size = 256
+            loader = DataLoader(subset, batch_size=transform_batch_size, num_workers=4, shuffle=False)
             
-            for i_local, batch in enumerate(tqdm(transform_loader, desc="Transforming")):
-                current_batch_idx = start_batch_idx + i_local
-                
+            current_idx = processed_count
+            
+            print(f"Transforming samples {processed_count} to {total_samples}...")
+            for batch in tqdm(loader, desc="Extracting Features"):
                 imgs = batch["image"]
-                flat = imgs.view(imgs.shape[0], -1) 
-
+                batch_len = imgs.shape[0]
+                x_numpy = imgs.view(batch_len, -1).numpy()
+                
                 if self.use_pca:
-                    feat = self.pca_processor.transform(flat) 
+                    feat = self.pca_processor.transform_numpy(x_numpy)
                 else:
-                    feat = flat
-
-                chunk_filename = f"chunk_{current_batch_idx:06d}.pt"
-                chunk_path = os.path.join(feat_chunks_dir, chunk_filename)
-                chunk_tmp = chunk_path + ".tmp"
-                torch.save(feat.cpu(), chunk_tmp)
-                os.replace(chunk_tmp, chunk_path)
-        else:
-            print("All chunks seem to be already processed.")
-        print("Merging feature chunks...")
-        all_chunk_files = sorted([os.path.join(feat_chunks_dir, f) for f in os.listdir(feat_chunks_dir) if f.startswith("chunk_")])
+                    feat = x_numpy
+                mmap_features[current_idx : current_idx + batch_len] = feat
+                current_idx += batch_len
+                with open(progress_path, 'w') as f:
+                    json.dump({"processed_count": current_idx}, f)
+            
+            mmap_features.flush()
         
-        if not all_chunk_files:
-            raise RuntimeError("No feature chunks found. Something went wrong.")
-        first_chunk = torch.load(all_chunk_files[0])
-        chunk_size = first_chunk.shape[0]
-        feature_dim = first_chunk.shape[1]
-        total_samples_calc = 0
-        for fpath in all_chunk_files:
-             pass
-        last_chunk = torch.load(all_chunk_files[-1])
-        total_samples_calc = (len(all_chunk_files) - 1) * batch_size + last_chunk.shape[0]
-        
-        if total_samples_calc != total_samples:
-            print(f"Warning: Calculated samples ({total_samples_calc}) != Dataset samples ({total_samples}).")
-            print("This might happen if dataset size changed or batch_size changed between runs.")
-
-        print(f"Total samples: {total_samples_calc}, Dimension: {feature_dim}")
-        full_tensor = torch.empty((total_samples_calc, feature_dim), dtype=first_chunk.dtype)
-        
-        current_idx = 0
-        for fpath in tqdm(all_chunk_files, desc="Merging into Tensor"):
-            chunk = torch.load(fpath)
-            end_idx = current_idx + chunk.shape[0]
-            full_tensor[current_idx:end_idx] = chunk
-            current_idx = end_idx
-        
-        print(f"Saving final features cache to {self.features_cache_path}")
+        print("Feature extraction complete. Converting to Torch Tensor...")
+        full_tensor = torch.from_numpy(mmap_features)
         torch.save(full_tensor, self.features_cache_path)
         
-        print("Cleaning up temp chunks...")
-        shutil.rmtree(feat_chunks_dir)
+        print(f"Features saved to {self.features_cache_path}")
         
-        full_tensor.share_memory_()
-        return full_tensor
+        del mmap_features 
+        if os.path.exists(temp_mmap_path):
+            os.remove(temp_mmap_path)
+        if os.path.exists(progress_path):
+            os.remove(progress_path)
+            
+        final_features = torch.load(self.features_cache_path, map_location="cpu")
+        final_features.share_memory_()
+        
+        return final_features
