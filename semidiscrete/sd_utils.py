@@ -15,6 +15,7 @@ from .sd_loader import SemidiscretePairingDataset
 class OnlinePCAProcessor:
     """
     Incremental PCA (IPCA) を使用し、メモリ爆発を防ぎながら学習・変換を行うクラス。
+    修正点: 学習完了時に中間チェックポイントを削除してディスク容量を確保する機能を追加。
     """
     def __init__(self, n_components: int, device: str):
         self.n_components = n_components
@@ -67,19 +68,22 @@ class OnlinePCAProcessor:
                 if checkpoint_path and samples_since_save >= save_interval:
                     self._save_checkpoint(checkpoint_path)
                     samples_since_save = 0
-
         if buffer_size > 0:
             X_batch = np.concatenate(buffer_list, axis=0)
             if buffer_size >= self.n_components or self.pca.n_samples_seen_ > 0:
                  self.pca.partial_fit(X_batch)
-        
-        if checkpoint_path:
-            self._save_checkpoint(checkpoint_path)
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            try:
+                os.remove(checkpoint_path)
+                print(f"Cleanup: Removed intermediate PCA checkpoint {checkpoint_path}")
+            except OSError as e:
+                print(f"Warning: Failed to remove checkpoint: {e}")
 
         self.is_fitted = True
         print("PCA fitting complete.")
 
     def _save_checkpoint(self, path):
+        """アトミックな保存を行い、書き込み中の破損を防ぐ"""
         temp_path = path + ".tmp"
         joblib.dump(self.pca, temp_path)
         if os.path.exists(temp_path):
@@ -99,7 +103,7 @@ class OnlinePCAProcessor:
 
     def transform_numpy(self, x_numpy: np.ndarray) -> np.ndarray:
         """
-        【追加】データ前処理用: NumPyを受け取り、NumPyを返す。
+        データ前処理用: NumPyを受け取り、NumPyを返す。
         GPU転送を行わないため、ディスク保存処理などで高速。
         """
         if not self.is_fitted:
@@ -194,11 +198,11 @@ class SD_Manager:
         print(f"Potential saved to {self.potential_path}")
         return g_ema
 
-
     def _prepare_features(self, dataset: Dataset) -> torch.Tensor:
         """
         全画像の特徴量を抽出し、キャッシュする。
-        【最適化済み】NumPy (mmap) を活用し、無駄なGPU転送を回避。
+        NumPy (mmap) を活用し、無駄なGPU転送を回避。
+        修正点: mmapへの書き込み直後に flush() を行い、システムクラッシュ時のデータ整合性を保証。
         """
         if os.path.exists(self.features_cache_path):
             if self.use_pca and not self.pca_processor.is_fitted:
@@ -212,7 +216,6 @@ class SD_Manager:
             return features
 
         print("Extracting features from dataset...")
-        
         if self.use_pca:
             if not os.path.exists(self.pca_model_path):
                 fit_batch_size = 256 
@@ -225,7 +228,6 @@ class SD_Manager:
                 self.pca_processor.save(self.pca_model_path)
             else:
                 self.pca_processor.load(self.pca_model_path)
-
         total_samples = len(dataset)
         temp_mmap_path = os.path.join(self.save_dir, "features_temp.mmap")
         progress_path = os.path.join(self.save_dir, "features_progress.json")
@@ -250,6 +252,7 @@ class SD_Manager:
             current_idx = processed_count
             
             print(f"Transforming samples {processed_count} to {total_samples}...")
+
             for batch in tqdm(loader, desc="Extracting Features"):
                 imgs = batch["image"]
                 batch_len = imgs.shape[0]
@@ -260,10 +263,11 @@ class SD_Manager:
                 else:
                     feat = x_numpy
                 mmap_features[current_idx : current_idx + batch_len] = feat
+                mmap_features.flush() # ★重要: OSキャッシュを強制的にディスクに書き込む
+                
                 current_idx += batch_len
                 with open(progress_path, 'w') as f:
                     json.dump({"processed_count": current_idx}, f)
-            
             mmap_features.flush()
         
         print("Feature extraction complete. Converting to Torch Tensor...")
@@ -271,8 +275,7 @@ class SD_Manager:
         torch.save(full_tensor, self.features_cache_path)
         
         print(f"Features saved to {self.features_cache_path}")
-        
-        del mmap_features 
+        del mmap_features  
         if os.path.exists(temp_mmap_path):
             os.remove(temp_mmap_path)
         if os.path.exists(progress_path):
