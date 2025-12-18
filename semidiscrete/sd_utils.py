@@ -135,8 +135,9 @@ class SD_Manager:
         
         self.save_dir = config['training'].get('save_dir', 'outputs')
         os.makedirs(self.save_dir, exist_ok=True)
-        
         self.potential_path = os.path.join(self.save_dir, "sd_potential.pt")
+        self.potential_ckpt_path = os.path.join(self.save_dir, "sd_potential_checkpoint.pt")
+        
         self.pca_model_path = os.path.join(self.save_dir, "pca_model.joblib")
         self.features_mmap_path = os.path.join(self.save_dir, "features.mmap")
         self.features_done_flag = os.path.join(self.save_dir, "features_done.flag")
@@ -185,10 +186,16 @@ class SD_Manager:
     
     def _prepare_potential(self, features_tensor: torch.Tensor, dataset_size: int) -> torch.Tensor:
         if os.path.exists(self.potential_path):
-            print(f"Loading existing potential from {self.potential_path}")
-            return torch.load(self.potential_path, map_location=self.device)
+            print(f"Loading finished potential from {self.potential_path}")
+            try:
+                data = torch.load(self.potential_path, map_location=self.device)
+                if isinstance(data, dict) and 'g_ema' in data:
+                    return data['g_ema']
+                return data
+            except:
+                return torch.load(self.potential_path, map_location=self.device)
         
-        print("Potential not found. Starting SD-OT training (Phase 1)...")
+        print("Potential not found (or incomplete). Starting/Resuming SD-OT training (Phase 1)...")
         solver = SemidiscreteOT_Solver(
             dataset_size=dataset_size,
             feature_dim=self.feature_dim,
@@ -199,11 +206,15 @@ class SD_Manager:
         g_ema = solver.train_loop(
             flattened_dataset_tensor=features_tensor,
             num_iterations=self.sd_config.get('potential_steps', 20000),
-            chunk_size=self.sd_config.get('pairing_chunk_size', 10000)
+            chunk_size=self.sd_config.get('pairing_chunk_size', 10000),
+            checkpoint_path=self.potential_ckpt_path, 
+            save_interval=5000 # 5000ステップごとに保存
         )
-        
         torch.save(g_ema, self.potential_path)
-        print(f"Potential saved to {self.potential_path}")
+        print(f"Potential training finished and saved to {self.potential_path}")
+        if os.path.exists(self.potential_ckpt_path):
+            os.remove(self.potential_ckpt_path)
+            
         return g_ema
 
     def _prepare_features(self, dataset: Dataset) -> torch.Tensor:
@@ -249,7 +260,7 @@ class SD_Manager:
              mode = 'r+'
         else:
              mode = 'w+'
-             processed_count = 0 # ファイルが無い、または最初からの場合は0リセット
+             processed_count = 0 
 
         mmap_features = np.memmap(
             self.features_mmap_path, 
