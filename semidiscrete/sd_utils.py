@@ -15,7 +15,6 @@ from .sd_loader import SemidiscretePairingDataset
 class OnlinePCAProcessor:
     """
     Incremental PCA (IPCA) を使用し、メモリ爆発を防ぎながら学習・変換を行うクラス。
-    修正点: 学習完了時に中間チェックポイントを削除してディスク容量を確保する機能を追加。
     """
     def __init__(self, n_components: int, device: str):
         self.n_components = n_components
@@ -30,6 +29,7 @@ class OnlinePCAProcessor:
                 self.pca = joblib.load(checkpoint_path)
             except Exception as e:
                 print(f" -> Failed to load checkpoint: {e}. Starting from scratch.")
+        
         samples_seen = self.pca.n_samples_seen_ if hasattr(self.pca, 'n_samples_seen_') else 0
         total_samples = len(dataset)
         
@@ -39,7 +39,6 @@ class OnlinePCAProcessor:
             return
 
         print(f"Fitting PCA incrementally... Resuming from sample {samples_seen}")
-        
         remaining_indices = range(samples_seen, total_samples)
         subset = Subset(dataset, remaining_indices)
         dataloader = DataLoader(subset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
@@ -68,10 +67,12 @@ class OnlinePCAProcessor:
                 if checkpoint_path and samples_since_save >= save_interval:
                     self._save_checkpoint(checkpoint_path)
                     samples_since_save = 0
+        
         if buffer_size > 0:
             X_batch = np.concatenate(buffer_list, axis=0)
             if buffer_size >= self.n_components or self.pca.n_samples_seen_ > 0:
                  self.pca.partial_fit(X_batch)
+        
         if checkpoint_path and os.path.exists(checkpoint_path):
             try:
                 os.remove(checkpoint_path)
@@ -136,7 +137,8 @@ class SD_Manager:
         
         self.potential_path = os.path.join(self.save_dir, "sd_potential.pt")
         self.pca_model_path = os.path.join(self.save_dir, "pca_model.joblib")
-        self.features_cache_path = os.path.join(self.save_dir, "cached_features.pt")
+        self.features_mmap_path = os.path.join(self.save_dir, "features.mmap")
+        self.features_done_flag = os.path.join(self.save_dir, "features_done.flag")
         
         self.raw_dim = config['data']['height'] * config['data']['width'] * config['data']['channels']
         self.use_pca = self.sd_config.get('use_pca', False)
@@ -158,7 +160,7 @@ class SD_Manager:
         
         sd_dataset = SemidiscretePairingDataset(
             original_dataset=raw_dataset,
-            dataset_features=features_tensor,
+            dataset_features=features_tensor, # CPU上のmmap Tensorを渡す
             potential_g=potential_g,
             device=torch.device('cpu'),
             batch_size=self.config['training']['batch_size'],
@@ -201,18 +203,18 @@ class SD_Manager:
     def _prepare_features(self, dataset: Dataset) -> torch.Tensor:
         """
         全画像の特徴量を抽出し、キャッシュする。
-        NumPy (mmap) を活用し、無駄なGPU転送を回避。
-        修正点: mmapへの書き込み直後に flush() を行い、システムクラッシュ時のデータ整合性を保証。
+        NumPy memmap を活用し、無駄なGPU転送とRAM圧迫を回避する。
         """
-        if os.path.exists(self.features_cache_path):
+        total_samples = len(dataset)
+        if os.path.exists(self.features_mmap_path) and os.path.exists(self.features_done_flag):
             if self.use_pca and not self.pca_processor.is_fitted:
                 if os.path.exists(self.pca_model_path):
                     print("Loading PCA model for cached features...")
                     self.pca_processor.load(self.pca_model_path)
             
-            print(f"Loading cached features from {self.features_cache_path}")
-            features = torch.load(self.features_cache_path, map_location="cpu")
-            features.share_memory_()
+            print(f"Loading cached features via mmap from {self.features_mmap_path}")
+            mmap_features = np.memmap(self.features_mmap_path, dtype='float32', mode='r', shape=(total_samples, self.feature_dim))
+            features = torch.from_numpy(mmap_features)
             return features
 
         print("Extracting features from dataset...")
@@ -228,12 +230,9 @@ class SD_Manager:
                 self.pca_processor.save(self.pca_model_path)
             else:
                 self.pca_processor.load(self.pca_model_path)
-        total_samples = len(dataset)
-        temp_mmap_path = os.path.join(self.save_dir, "features_temp.mmap")
-        progress_path = os.path.join(self.save_dir, "features_progress.json")
-        mode = 'r+' if os.path.exists(temp_mmap_path) else 'w+'
-        mmap_features = np.memmap(temp_mmap_path, dtype='float32', mode=mode, shape=(total_samples, self.feature_dim))
+        mmap_features = np.memmap(self.features_mmap_path, dtype='float32', mode='w+', shape=(total_samples, self.feature_dim))
         
+        progress_path = os.path.join(self.save_dir, "features_progress.json")
         processed_count = 0
         if os.path.exists(progress_path):
             try:
@@ -250,7 +249,9 @@ class SD_Manager:
             loader = DataLoader(subset, batch_size=transform_batch_size, num_workers=4, shuffle=False)
             
             current_idx = processed_count
-            
+            samples_since_flush = 0
+            FLUSH_INTERVAL = 10000 
+
             print(f"Transforming samples {processed_count} to {total_samples}...")
 
             for batch in tqdm(loader, desc="Extracting Features"):
@@ -263,25 +264,23 @@ class SD_Manager:
                 else:
                     feat = x_numpy
                 mmap_features[current_idx : current_idx + batch_len] = feat
-                mmap_features.flush() # ★重要: OSキャッシュを強制的にディスクに書き込む
                 
                 current_idx += batch_len
-                with open(progress_path, 'w') as f:
-                    json.dump({"processed_count": current_idx}, f)
+                samples_since_flush += batch_len
+                if samples_since_flush >= FLUSH_INTERVAL:
+                    mmap_features.flush()
+                    samples_since_flush = 0
+                    with open(progress_path, 'w') as f:
+                        json.dump({"processed_count": current_idx}, f)
             mmap_features.flush()
         
-        print("Feature extraction complete. Converting to Torch Tensor...")
-        full_tensor = torch.from_numpy(mmap_features)
-        torch.save(full_tensor, self.features_cache_path)
-        
-        print(f"Features saved to {self.features_cache_path}")
-        del mmap_features  
-        if os.path.exists(temp_mmap_path):
-            os.remove(temp_mmap_path)
+        print("Feature extraction complete.")
+        with open(self.features_done_flag, 'w') as f:
+            f.write("done")
+            
         if os.path.exists(progress_path):
             os.remove(progress_path)
-            
-        final_features = torch.load(self.features_cache_path, map_location="cpu")
-        final_features.share_memory_()
+        del mmap_features
+        mmap_features = np.memmap(self.features_mmap_path, dtype='float32', mode='r', shape=(total_samples, self.feature_dim))
         
-        return final_features
+        return torch.from_numpy(mmap_features)
