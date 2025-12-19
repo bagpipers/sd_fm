@@ -240,7 +240,7 @@ class SD_Manager:
                 self.pca_processor.fit_incremental(
                     dataset, 
                     batch_size=fit_batch_size, 
-                    num_workers=4, 
+                    num_workers=0, 
                     checkpoint_path=os.path.join(self.save_dir, "pca_checkpoint_fit.joblib")
                 )
                 self.pca_processor.save(self.pca_model_path)
