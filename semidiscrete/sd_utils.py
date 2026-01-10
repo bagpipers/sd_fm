@@ -14,14 +14,36 @@ from .sd_loader import SemidiscretePairingDataset
 class OnlinePCAProcessor:
     """
     Incremental PCA (IPCA) を使用し、メモリ爆発を防ぎながら学習・変換を行うクラス。
+    大規模なデータセットに対して、バッチごとにPCAを適用・更新します。
     """
     def __init__(self, n_components: int, device: str):
+        """
+        OnlinePCAProcessorを初期化します。
+
+        Args:
+            n_components (int): PCAで保持する主成分の数（圧縮後の次元数）。
+            device (str): 変換後のテンソルを配置するデバイス（'cuda' または 'cpu'）。
+        """
         self.n_components = n_components
         self.device = device
         self.pca = IncrementalPCA(n_components=n_components)
         self.is_fitted = False
 
     def fit_incremental(self, dataset: Dataset, batch_size: int, num_workers: int, checkpoint_path: Optional[str] = None, save_interval: int = 5000):
+        """
+        データセットを用いてIncremental PCAを学習させます。
+        チェックポイント機能により、中断された学習を再開することが可能です。
+
+        Args:
+            dataset (Dataset): 学習に使用する画像データセット。
+            batch_size (int): PCAのpartial_fitに渡すバッチサイズ。
+            num_workers (int): DataLoaderのワーカー数。
+            checkpoint_path (Optional[str], optional): 学習途中の状態を保存/ロードするパス。
+            save_interval (int, optional): 何サンプル処理するごとにチェックポイントを保存するか。
+
+        Returns:
+            None
+        """
         if checkpoint_path and os.path.exists(checkpoint_path):
             print(f"Resuming PCA fitting from {checkpoint_path}...")
             try:
@@ -38,7 +60,8 @@ class OnlinePCAProcessor:
             return
 
         print(f"Fitting PCA incrementally... Resuming from sample {samples_seen}")
-        remaining_indices = range(samples_seen, total_samples)
+        
+        remaining_indices = range(int(samples_seen), total_samples)
         if len(remaining_indices) == 0:
              self.is_fitted = True
              return
@@ -61,6 +84,7 @@ class OnlinePCAProcessor:
             buffer_size += current_batch_size
             samples_since_save += current_batch_size
             
+            # IncrementalPCAは、特徴量次元数以上のサンプル数がバッチに必要
             if buffer_size >= min_batch_size:
                 X_batch = np.concatenate(buffer_list, axis=0)
                 self.pca.partial_fit(X_batch)
@@ -70,10 +94,15 @@ class OnlinePCAProcessor:
                 if checkpoint_path and samples_since_save >= save_interval:
                     self._save_checkpoint(checkpoint_path)
                     samples_since_save = 0
+        
+        # 残りのバッファを処理
         if buffer_size > 0:
             X_batch = np.concatenate(buffer_list, axis=0)
+            # 既に学習済みサンプルがある場合、またはバッファが成分数以上の場合のみfit
             if buffer_size >= self.n_components or self.pca.n_samples_seen_ > 0:
                  self.pca.partial_fit(X_batch)
+        
+        # 学習完了後のクリーンアップ
         if checkpoint_path and os.path.exists(checkpoint_path):
             try:
                 os.remove(checkpoint_path)
@@ -85,7 +114,12 @@ class OnlinePCAProcessor:
         print("PCA fitting complete.")
 
     def _save_checkpoint(self, path):
-        """アトミックな保存を行い、書き込み中の破損を防ぐ"""
+        """
+        学習中のPCAモデルをアトミックに保存します。書き込み中の破損を防ぎます。
+
+        Args:
+            path (str): 保存先のファイルパス。
+        """
         temp_path = path + ".tmp"
         joblib.dump(self.pca, temp_path)
         if os.path.exists(temp_path):
@@ -93,51 +127,103 @@ class OnlinePCAProcessor:
 
     def transform(self, x_tensor: torch.Tensor) -> torch.Tensor:
         """
-        学習・推論時用: Tensorを受け取り、GPU Tensorを返す。
+        入力テンソルをPCA変換し、GPUテンソルとして返します。
+        主に学習時や推論時に使用します。
+
+        Args:
+            x_tensor (torch.Tensor): 入力画像テンソル [Batch, C, H, W] または [Batch, FlatDim]。
+
+        Returns:
+            torch.Tensor: PCA変換後の特徴量テンソル [Batch, n_components]。デバイスはself.device。
+        
+        Raises:
+            RuntimeError: PCAがまだ学習（fit）されていない場合。
         """
         if not self.is_fitted:
             raise RuntimeError("PCA is not fitted yet.")
         
-        x_cpu = x_tensor.detach().cpu().numpy()
+        x_cpu = x_tensor.detach().cpu().view(x_tensor.shape[0], -1).numpy()
         x_pca = np.dot(x_cpu, self.pca.components_.T)
         
         return torch.from_numpy(x_pca).to(self.device).float()
 
     def transform_numpy(self, x_numpy: np.ndarray) -> np.ndarray:
         """
-        データ前処理用: NumPyを受け取り、NumPyを返す。
-        GPU転送を行わないため、ディスク保存処理などで高速。
+        NumPy配列を入力として受け取り、PCA変換後のNumPy配列を返します。
+        データ前処理（特徴量抽出）用であり、GPU転送を行わないためディスク保存処理などで高速です。
+
+        Args:
+            x_numpy (np.ndarray): 入力画像データ [Batch, FlatDim]。
+
+        Returns:
+            np.ndarray: PCA変換後の特徴量データ [Batch, n_components]。
+        
+        Raises:
+            RuntimeError: PCAがまだ学習（fit）されていない場合。
         """
         if not self.is_fitted:
             raise RuntimeError("PCA is not fitted yet.")
         return np.dot(x_numpy, self.pca.components_.T)
 
     def get_components_tensor(self) -> torch.Tensor:
+        """
+        PCAの基底ベクトル（components_）をTensorとして取得します。
+
+        Returns:
+            torch.Tensor: PCA成分行列 [n_components, OriginalDim]。デバイスはself.device。
+        
+        Raises:
+            RuntimeError: PCAがまだ学習（fit）されていない場合。
+        """
         if not self.is_fitted:
             raise RuntimeError("PCA is not fitted yet.")
         return torch.from_numpy(self.pca.components_).float().to(self.device)
 
     def save(self, path: str):
+        """
+        PCAモデルをjoblib形式で保存します。
+
+        Args:
+            path (str): 保存先のパス。
+        """
         joblib.dump(self.pca, path)
         print(f"PCA model saved to {path}")
 
     def load(self, path: str):
+        """
+        PCAモデルをjoblib形式からロードします。
+
+        Args:
+            path (str): ロード元のパス。
+        """
         self.pca = joblib.load(path)
         self.is_fitted = True
         print(f"PCA model loaded from {path}")
 
 
 class SD_Manager:
+    """
+    SD-FM (Semidiscrete Flow Matching) の学習に必要な前処理を一括管理するクラス。
+    特徴量抽出、PCA学習、ポテンシャル（双対変数）の学習、およびデータローダーの構築を担当します。
+    """
     def __init__(self, config: dict, device: str):
+        """
+        SD_Managerを初期化します。保存ディレクトリやパスの設定を行います。
+
+        Args:
+            config (dict): 設定ファイルの内容を含む辞書。
+            device (str): 計算に使用するデバイス。
+        """
         self.config = config
         self.sd_config = config.get('sd_config', {})
         self.device = device
         
         self.save_dir = config['training'].get('save_dir', 'outputs')
         os.makedirs(self.save_dir, exist_ok=True)
+        
+        # 各種ファイルのパス設定
         self.potential_path = os.path.join(self.save_dir, "sd_potential.pt")
         self.potential_ckpt_path = os.path.join(self.save_dir, "sd_potential_checkpoint.pt")
-        
         self.pca_model_path = os.path.join(self.save_dir, "pca_model.joblib")
         self.features_mmap_path = os.path.join(self.save_dir, "features.mmap")
         self.features_done_flag = os.path.join(self.save_dir, "features_done.flag")
@@ -154,7 +240,16 @@ class SD_Manager:
     def prepare_dataloader(self, raw_dataset: Dataset) -> DataLoader:
         """
         SD-FM学習に必要なデータローダーを準備します。
-        特徴量の抽出、ポテンシャルの学習、ペアリングデータセットの構築を一括で行います。
+        以下の手順を順次実行します：
+        1. 特徴量の抽出（必要であればPCA学習含む）とディスクへのキャッシュ。
+        2. Semidiscrete OT のポテンシャル $g$ の学習（Phase 1）。
+        3. ペアリング機能を持つ専用データセット（SemidiscretePairingDataset）の構築。
+
+        Args:
+            raw_dataset (Dataset): 元の画像データセット。
+
+        Returns:
+            DataLoader: (ノイズ, 画像) の最適ペアを生成するデータローダー。
         """
         print("\n=== [SD-FM Manager] Preparing Data & Potential... ===")
         features_tensor = self._prepare_features(raw_dataset)
@@ -163,11 +258,12 @@ class SD_Manager:
         pca_components_tensor = None
         if self.use_pca and self.pca_processor is not None:
             pca_components_tensor = self.pca_processor.get_components_tensor()
+            
         sd_dataset = SemidiscretePairingDataset(
             original_dataset=raw_dataset,
             dataset_features=features_tensor, # CPU上のmmap Tensor
             potential_g=potential_g.cpu(),    # ポテンシャルもCPUへ
-            device=torch.device('cpu'),       # 明示的にCPU指定
+            device=torch.device('cpu'),       # 明示的にCPU指定（ペアリング計算用）
             batch_size=self.config['training']['batch_size'],
             pca_components=pca_components_tensor.cpu() if pca_components_tensor is not None else None,
             chunk_size=self.sd_config.get('pairing_chunk_size', 10000)
@@ -185,6 +281,16 @@ class SD_Manager:
         )
     
     def _prepare_potential(self, features_tensor: torch.Tensor, dataset_size: int) -> torch.Tensor:
+        """
+        Semidiscrete OT のポテンシャル $g$ を学習、または学習済みファイルからロードします。
+        
+        Args:
+            features_tensor (torch.Tensor): データセットの特徴量テンソル [N, Feature_Dim]。
+            dataset_size (int): データセットの総サンプル数 N。
+
+        Returns:
+            torch.Tensor: 学習済みのポテンシャルベクトル $g$ [N]。
+        """
         if os.path.exists(self.potential_path):
             print(f"Loading finished potential from {self.potential_path}")
             try:
@@ -219,10 +325,21 @@ class SD_Manager:
 
     def _prepare_features(self, dataset: Dataset) -> torch.Tensor:
         """
-        全画像の特徴量を抽出し、キャッシュする。
-        NumPy memmap を活用し、無駄なGPU転送とRAM圧迫を回避する。
+        データセット内の全画像から特徴量を抽出し、NumPy memmap形式でディスクにキャッシュします。
+        PCAが有効な場合は、特徴量抽出前にPCAの学習（fit）も行います。
+        
+        メモリストレージ（memmap）を使用することで、大規模データセットでもRAMを圧迫せずに処理可能です。
+
+        Args:
+            dataset (Dataset): 元の画像データセット。
+
+        Returns:
+            torch.Tensor: キャッシュされた特徴量をラップしたTensor [N, Feature_Dim]。
+                          実体はディスク上のmemmapファイルです。
         """
         total_samples = len(dataset)
+        
+        # 既に完了フラグとファイルが存在する場合はロードして終了
         if os.path.exists(self.features_mmap_path) and os.path.exists(self.features_done_flag):
             if self.use_pca and not self.pca_processor.is_fitted:
                 if os.path.exists(self.pca_model_path):
@@ -234,6 +351,8 @@ class SD_Manager:
             return torch.from_numpy(mmap_features)
 
         print("Extracting features from dataset...")
+        
+        # PCAの学習 (必要な場合)
         if self.use_pca:
             if not os.path.exists(self.pca_model_path):
                 fit_batch_size = 256 
@@ -246,6 +365,8 @@ class SD_Manager:
                 self.pca_processor.save(self.pca_model_path)
             else:
                 self.pca_processor.load(self.pca_model_path)
+        
+        # 特徴量抽出の進捗管理
         progress_path = os.path.join(self.save_dir, "features_progress.json")
         processed_count = 0
         if os.path.exists(progress_path):
@@ -256,6 +377,8 @@ class SD_Manager:
                 print(f"Resuming feature extraction from sample {processed_count}...")
             except:
                 print("Failed to load progress file. Starting from 0.")
+        
+        # memmapのモード設定
         if processed_count > 0 and os.path.exists(self.features_mmap_path):
              mode = 'r+'
         else:
@@ -269,6 +392,7 @@ class SD_Manager:
             shape=(total_samples, self.feature_dim)
         )
         
+        # 未処理分のデータを処理
         if processed_count < total_samples:
             subset = Subset(dataset, range(processed_count, total_samples))
             transform_batch_size = 256
@@ -309,6 +433,8 @@ class SD_Manager:
             
         if os.path.exists(progress_path):
             os.remove(progress_path)
+        
+        # 書き込みモードから読み込みモードへ再オープン
         del mmap_features
         mmap_features = np.memmap(self.features_mmap_path, dtype='float32', mode='r', shape=(total_samples, self.feature_dim))
         
