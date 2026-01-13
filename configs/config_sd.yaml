@@ -10,6 +10,7 @@ data:
   metadata_file: "metadata.csv" 
 
 model:
+  
   condition_type: "class" 
   
   clip_config:
@@ -36,7 +37,7 @@ training:
   lr: 1.0e-4
   cfg_drop_prob: 0.1 
   num_epochs: 10     
-  num_workers: 8
+  num_workers: 4
   save_dir: "outputs/sd_fm_experiment"
 
 # ---  SD-FM Specific Configurations  ---
@@ -44,6 +45,8 @@ sd_config:
   # PCA次元削減 (論文では500推奨)
   use_pca: true
   pca_dim: 2000
+  pca_device: "cuda"
+  pca_fit_batch_size: 2000
   
   # SD-OT (ポテンシャル学習) の設定
   potential_lr: 1000.0  # 論文推奨: データ数Nに応じて調整 (例: 10^3)
