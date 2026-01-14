@@ -3,10 +3,10 @@
 device: "cuda"
 
 data:
-  root_dir: "/mnt/k/2025/imagenet_dataset"
-  height: 299        
-  width: 299        
-  channels: 3   
+  root_dir: "/mnt/k/2025/mnist_dataset"
+  height: 28        
+  width: 28        
+  channels: 1   
   metadata_file: "metadata.csv" 
 
 model:
@@ -19,12 +19,12 @@ model:
     embed_dim: 768 
 
   class_config:
-    num_classes: 1000
+    num_classes: 10
     embed_dim: 512  
 
   unet_config:
     base_dim: 128        
-    dim_mults: [1, 2, 4] 
+    dim_mults: [1, 2] 
     num_attn_heads: 4    
 
 sampling:
@@ -33,25 +33,26 @@ sampling:
   guidance_scale: 7.5 
 
 training:
-  batch_size: 4  # FM学習時のバッチサイズ
+  mode: "ifm" ## "ifm" (Independent) or "sd_fm" (Semidiscrete)
+  batch_size: 64  # FM学習時のバッチサイズ
   lr: 1.0e-4
   cfg_drop_prob: 0.1 
   num_epochs: 10     
   num_workers: 4
-  save_dir: "outputs/sd_fm_experiment"
+  save_dir: "/mnt/k/2025/mnist_FM/outputs/ifm_experiment"
 
 # ---  SD-FM Specific Configurations  ---
 sd_config:
   # PCA次元削減 (論文では500推奨)
   use_pca: true
-  pca_dim: 2000
+  pca_dim: 100
   pca_device: "cuda"
-  pca_fit_batch_size: 2000
+  pca_fit_batch_size: 200
   
   # SD-OT (ポテンシャル学習) の設定
   potential_lr: 1000.0  # 論文推奨: データ数Nに応じて調整 (例: 10^3)
   potential_steps: 200000
-  potential_batch_size: 1024
+  potential_batch_size: 1000
   
   # メモリ対策: ペアリング計算時のチャンクサイズ
   # データ数Nが大きい場合、一度に計算するとOOMになるため分割する

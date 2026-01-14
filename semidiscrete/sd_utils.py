@@ -254,7 +254,7 @@ class SD_Manager:
                     print("Loading PCA model for cached features...")
                     self.pca_processor.load(self.pca_model_path)
             print(f"Loading cached features via mmap from {self.features_mmap_path}")
-            mmap_features = np.memmap(self.features_mmap_path, dtype='float32', mode='r', shape=(total_samples, self.feature_dim))
+            mmap_features = np.memmap(self.features_mmap_path, dtype='float32', mode='c', shape=(total_samples, self.feature_dim))
             return torch.from_numpy(mmap_features)
 
         print("Extracting features from dataset...")
@@ -321,6 +321,6 @@ class SD_Manager:
         with open(self.features_done_flag, 'w') as f: f.write("done")
         if os.path.exists(progress_path): os.remove(progress_path)
         del mmap_features
-        mmap_features = np.memmap(self.features_mmap_path, dtype='float32', mode='r', shape=(total_samples, self.feature_dim))
+        mmap_features = np.memmap(self.features_mmap_path, dtype='float32', mode='c', shape=(total_samples, self.feature_dim))
         
         return torch.from_numpy(mmap_features)
