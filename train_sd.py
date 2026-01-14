@@ -11,9 +11,11 @@ from dataloader import T2IDataset
 from semidiscrete.sd_utils import SD_Manager    
 from paths.ot_cfm_sd import PairedOTCFM       
 from paths.ot_cfm import OTConditionalFlowMatching 
+from paths.minibatch_ot_cfm import MinibatchOTCFM
 
 def main():
     config_path = "configs/config_sd.yaml"
+    
     if not os.path.exists(config_path):
         print(f"Warning: {config_path} not found.")
         
@@ -31,7 +33,6 @@ def main():
 
     img_channels = config['data']['channels']
     h, w = config['data']['height'], config['data']['width']
-
     transform = transforms.Compose([
             transforms.Resize(max(h, w)), 
             transforms.CenterCrop((h, w)),
@@ -45,23 +46,32 @@ def main():
         target_channels=img_channels,
     )
     print(f"Raw dataset size: {len(raw_dataset)}")
-    if training_mode == "ifm":
-        print("Initializing standard DataLoader for IFM...")
+    
+    if training_mode in ["ifm", "minibatch_ot"]:
+        print(f"Initializing standard DataLoader for {training_mode}...")
         dataloader = DataLoader(
             raw_dataset,
             batch_size=config['training']['batch_size'],
-            shuffle=True, # IFMはランダムシャッフル必須
+            shuffle=True, 
             num_workers=config['training']['num_workers'],
             pin_memory=True
         )
-        cfm = OTConditionalFlowMatching(sigma_min=1e-5)
+        
+        if training_mode == "ifm":
+            cfm = OTConditionalFlowMatching(sigma_min=1e-5)
+        else:
+            print("Initializing Minibatch OT-CFM Solver...")
+            cfm = MinibatchOTCFM(sigma_min=1e-5)
     
-    else:
+    elif training_mode == "sd_fm":
         print("Initializing SD-Manager for SD-FM...")
         sd_manager = SD_Manager(config, device)
         dataloader = sd_manager.prepare_dataloader(raw_dataset)
         cfm = PairedOTCFM(sigma_min=1e-5)
-
+        
+    else:
+        raise ValueError(f"Unknown training mode: {training_mode}")
+    
     condition_model = ConditioningModel(config).to(device)
     model = TextConditionedUNet(config).to(device)
     
@@ -75,7 +85,12 @@ def main():
     condition_model.train()
     
     batch_size = config['training']['batch_size']
-    steps_per_epoch = len(raw_dataset) // batch_size
+    
+    try:
+        steps_per_epoch = len(dataloader)
+    except:
+        steps_per_epoch = len(raw_dataset) // batch_size
+
     num_epochs = config['training']['num_epochs']
     
     for epoch in range(num_epochs):
@@ -90,7 +105,7 @@ def main():
             text_embeddings = condition_model(batch, device)
             
             optimizer.zero_grad()
-            if training_mode == "ifm":
+            if training_mode in ["ifm", "minibatch_ot"]:
                 loss = cfm.compute_loss(model, x_1=images, condition=text_embeddings)
             
             else:
@@ -105,7 +120,6 @@ def main():
             
             total_loss += loss.item()
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
-            
         epoch_save_path = os.path.join(save_dir, f"model_epoch_{epoch+1}.pth")
         torch.save({
             'epoch': epoch + 1,

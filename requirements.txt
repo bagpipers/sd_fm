@@ -8,3 +8,4 @@ Pillow
 numpy
 tqdm
 scikit-learn
+scipy

@@ -33,13 +33,13 @@ sampling:
   guidance_scale: 7.5 
 
 training:
-  mode: "ifm" ## "ifm" (Independent) or "sd_fm" (Semidiscrete)
+  mode: "minibatch_ot"  # "ifm", "sd_fm", "minibatch_ot" から選択
   batch_size: 64  # FM学習時のバッチサイズ
   lr: 1.0e-4
   cfg_drop_prob: 0.1 
   num_epochs: 10     
   num_workers: 4
-  save_dir: "/mnt/k/2025/mnist_FM/outputs/ifm_experiment"
+  save_dir: "/mnt/k/2025/mnist_FM/outputs/minibatch_ot_experiment"
 
 # ---  SD-FM Specific Configurations  ---
 sd_config:
